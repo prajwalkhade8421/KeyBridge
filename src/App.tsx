@@ -2,11 +2,12 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   AndroidBackendMode,
   ConnectedMouseDevice,
-  DEFAULT_INITIAL_MAPPINGS,
   DiagnosticEventRecord,
   HeldButtonState,
   MappingRule,
   getDestinationDetails,
+  getKeyboardInputById,
+  getMouseInputByDomButton,
   getMouseInputById
 } from './data/inputCatalog';
 import { ANDROID_STUDIO_SOURCE_FILES } from './data/androidStudioProject';
@@ -15,28 +16,29 @@ import { DiagnosticVerifier } from './components/DiagnosticVerifier';
 import { FeasibilityReportView } from './components/FeasibilityReportView';
 import { AndroidProjectExporter } from './components/AndroidProjectExporter';
 import {
-  CheckCircle2,
-  RotateCcw,
   Sun,
   Moon,
   Smartphone,
   Activity,
   ShieldCheck,
   Code2,
-  Columns2
+  Columns2,
+  Trash2,
+  Zap
 } from 'lucide-react';
 
-const STORAGE_KEY_MAPPINGS = 'keybridge_datastore_mappings_v1';
-const STORAGE_KEY_MASTER = 'keybridge_datastore_master_v1';
-const STORAGE_KEY_BACKEND = 'keybridge_datastore_backend_v1';
-const STORAGE_KEY_THEME = 'keybridge_datastore_theme_v1';
-const STORAGE_KEY_REDUCE_MOTION = 'keybridge_datastore_reduce_motion_v1';
-const STORAGE_KEY_TECH_CODES = 'keybridge_datastore_tech_codes_v1';
+// Clean v2 storage key so no pre-given examples are ever loaded
+const STORAGE_KEY_MAPPINGS = 'keybridge_datastore_mappings_v2';
+const STORAGE_KEY_MASTER = 'keybridge_datastore_master_v2';
+const STORAGE_KEY_BACKEND = 'keybridge_datastore_backend_v2';
+const STORAGE_KEY_THEME = 'keybridge_datastore_theme_v2';
+const STORAGE_KEY_REDUCE_MOTION = 'keybridge_datastore_reduce_motion_v2';
+const STORAGE_KEY_TECH_CODES = 'keybridge_datastore_tech_codes_v2';
 
 type WorkspaceTab = 'WORKBENCH' | 'APP_ONLY' | 'VERIFIER_ONLY' | 'FEASIBILITY' | 'SOURCE';
 
 export default function App() {
-  // 1. Theme & Accessibility Preferences (Dark Theme is primary default)
+  // 1. Theme & Accessibility Preferences (Dark Theme default)
   const [isDark, setIsDark] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_THEME);
@@ -65,8 +67,9 @@ export default function App() {
   });
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('WORKBENCH');
+  const [isWizardConfiguring, setIsWizardConfiguring] = useState<boolean>(false);
 
-  // 2. Persistent DataStore State (Survives close, disconnect, and phone restart)
+  // 2. Persistent DataStore State (Starts completely empty — no pre-given examples)
   const [masterEnabled, setMasterEnabled] = useState<boolean>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY_MASTER);
@@ -84,9 +87,9 @@ export default function App() {
         if (Array.isArray(parsed)) return parsed;
       }
     } catch {
-      // Fallback to default examples from prompt
+      // ignore
     }
-    return DEFAULT_INITIAL_MAPPINGS;
+    return [];
   });
 
   const [backendMode, setBackendMode] = useState<AndroidBackendMode>(() => {
@@ -154,23 +157,28 @@ export default function App() {
     }
   }, [backendMode]);
 
-  // 3. Dynamic Connected Mouse State (Starts at 0 connected mice to prove offline configuration)
+  // 3. Dynamic Connected Mouse State
   const [connectedMice, setConnectedMice] = useState<ConnectedMouseDevice[]>([]);
   const [appUiClosed, setAppUiClosed] = useState<boolean>(false);
-  const [lastLifecycleMessage, setLastLifecycleMessage] = useState<string | null>(
-    '0 mice connected · Configure mappings offline or attach a mouse below.'
-  );
+  const [lastLifecycleMessage, setLastLifecycleMessage] = useState<string | null>(null);
 
-  // 4. Stateful Remapping Engine & Diagnostic Verifier State
+  // 4. Stateful Remapping Engine & Live Redirect State
   const [activeHolds, setActiveHolds] = useState<HeldButtonState[]>([]);
   const [diagnosticLog, setDiagnosticLog] = useState<DiagnosticEventRecord[]>([]);
   const [targetSandboxBuffer, setTargetSandboxBuffer] = useState<string>('');
   const [pojavLastAction, setPojavLastAction] = useState<string>(
-    'Ready (Press Mouse Forward → emits KEY_T)'
+    'Waiting for mapped mouse input...'
   );
   const [pojavHeldKeys, setPojavHeldKeys] = useState<string[]>([]);
+  const [liveHudBanner, setLiveHudBanner] = useState<string | null>(null);
 
-  // Upsert mapping rule (updates existing or creates new; blocks duplicate source actions)
+  useEffect(() => {
+    if (!liveHudBanner) return;
+    const timer = setTimeout(() => setLiveHudBanner(null), 1800);
+    return () => clearTimeout(timer);
+  }, [liveHudBanner]);
+
+  // Upsert mapping rule
   const handleSaveMapping = useCallback(
     (
       newRuleData: Omit<MappingRule, 'id' | 'createdAt' | 'updatedAt'>,
@@ -196,7 +204,7 @@ export default function App() {
         newRuleData.destinationId
       ).shortLabel;
       setLastLifecycleMessage(
-        `Saved (${srcLabel} → ${dstLabel}) to DataStore. Persists across disconnects and reboots.`
+        `Saved (${srcLabel} → ${dstLabel}) to DataStore. Active globally across the window.`
       );
     },
     []
@@ -212,14 +220,14 @@ export default function App() {
 
   const handleDeleteMapping = useCallback((id: string) => {
     setMappings((prev) => prev.filter((r) => r.id !== id));
-    setLastLifecycleMessage('Deleted mapping permanently from Jetpack DataStore.');
+    setLastLifecycleMessage('Deleted mapping permanently from DataStore.');
   }, []);
 
-  const handleResetDefaultMappings = () => {
-    setMappings(DEFAULT_INITIAL_MAPPINGS);
-    setLastLifecycleMessage(
-      'Restored example mappings (Mouse Forward → Keyboard T, Mouse Back → Keyboard G, Mouse Middle → Mouse Right).'
-    );
+  const handleClearAllMappings = () => {
+    setMappings([]);
+    setActiveHolds([]);
+    setPojavHeldKeys([]);
+    setLastLifecycleMessage('Cleared all saved mappings.');
   };
 
   // Connect a universal USB OTG or Bluetooth HID mouse dynamically
@@ -248,14 +256,10 @@ export default function App() {
       };
       setConnectedMice((prev) => [...prev, newDevice]);
       setLastLifecycleMessage(
-        `InputManager.onInputDeviceAdded(id=${newDeviceId}): ${newDevice.name} connected. ${
-          masterEnabled
-            ? 'Saved mappings applied automatically.'
-            : 'Master toggle is currently OFF.'
-        }`
+        `InputManager.onInputDeviceAdded(id=${newDeviceId}): ${newDevice.name} connected.`
       );
     },
-    [masterEnabled]
+    []
   );
 
   // Disconnect mouse & perform mandatory stuck-key release cleanup
@@ -296,7 +300,7 @@ export default function App() {
       });
 
       setLastLifecycleMessage(
-        `InputManager.onInputDeviceRemoved(id=${deviceId}): Mouse disconnected. Mappings remain saved; held keys safely released.`
+        `InputManager.onInputDeviceRemoved(id=${deviceId}): Mouse disconnected. Mappings remain saved.`
       );
     },
     [connectedMice]
@@ -356,85 +360,7 @@ export default function App() {
         (m) => m.sourceMouseId === sourceMouseId && m.enabled
       );
 
-      if (!masterEnabled) {
-        const record: DiagnosticEventRecord = {
-          id: `ev-${now}-${Math.random().toString(36).slice(2, 6)}`,
-          timestamp: now,
-          phase: 'PRESS',
-          deviceName: activeDevice.name,
-          rawMouseButtonLabel: sourceDef.shortLabel,
-          rawAndroidMotionConstant: sourceDef.androidMotionConstant,
-          rawLinuxEvdevConstant: sourceDef.linuxEvdevName,
-          matchedRuleId: null,
-          sourceSuppressed: false,
-          suppressionReason: 'Master Remapping toggle is OFF (Pass-through)',
-          replacementOutputLabel: `${sourceDef.shortLabel} (Unmodified)`,
-          replacementAndroidCode: sourceDef.androidMotionConstant,
-          replacementLinuxCode: sourceDef.linuxEvdevName,
-          deliveredToTargetApp: true,
-          deliveryNote: 'Original mouse button passed through without remapping'
-        };
-        setDiagnosticLog((prev) => [record, ...prev].slice(0, 50));
-        return;
-      }
-
-      if (backendMode === 'RESTRICTED_UNAVAILABLE') {
-        const record: DiagnosticEventRecord = {
-          id: `ev-${now}-${Math.random().toString(36).slice(2, 6)}`,
-          timestamp: now,
-          phase: 'PRESS',
-          deviceName: activeDevice.name,
-          rawMouseButtonLabel: sourceDef.shortLabel,
-          rawAndroidMotionConstant: sourceDef.androidMotionConstant,
-          rawLinuxEvdevConstant: sourceDef.linuxEvdevName,
-          matchedRuleId: matchedRule?.id ?? null,
-          sourceSuppressed: false,
-          suppressionReason: 'Android Policy: Background app lacks uinput or Accessibility permission',
-          replacementOutputLabel: 'Blocked by Stock Android Security',
-          replacementAndroidCode: 'SecurityException (INJECT_EVENTS denied)',
-          replacementLinuxCode: 'EACCES (/dev/uinput)',
-          deliveredToTargetApp: false,
-          deliveryNote: 'Enable Hybrid Root/Shizuku uinput or Stock Accessibility mode'
-        };
-        setDiagnosticLog((prev) => [record, ...prev].slice(0, 50));
-        setPojavLastAction('Blocked: No Android remapping service permission enabled');
-        return;
-      }
-
-      if (!matchedRule) {
-        const holdEntry: HeldButtonState = {
-          sourceMouseId,
-          deviceId: activeDevice.deviceId,
-          deviceName: activeDevice.name,
-          pressedAt: now,
-          ruleId: null,
-          resolvedTargetLabel: `${sourceDef.shortLabel} (Pass-through)`,
-          resolvedAndroidCode: sourceDef.androidMotionConstant,
-          resolvedLinuxCode: sourceDef.linuxEvdevName,
-          modifiers: [],
-          suppressedOriginal: false
-        };
-        setActiveHolds((prev) => [...prev, holdEntry]);
-
-        const record: DiagnosticEventRecord = {
-          id: `ev-${now}-${Math.random().toString(36).slice(2, 6)}`,
-          timestamp: now,
-          phase: 'PRESS',
-          deviceName: activeDevice.name,
-          rawMouseButtonLabel: sourceDef.shortLabel,
-          rawAndroidMotionConstant: sourceDef.androidMotionConstant,
-          rawLinuxEvdevConstant: sourceDef.linuxEvdevName,
-          matchedRuleId: null,
-          sourceSuppressed: false,
-          suppressionReason: 'No mapping rule defined for this button (Native pass-through)',
-          replacementOutputLabel: `${sourceDef.shortLabel} (Pass-through)`,
-          replacementAndroidCode: sourceDef.androidMotionConstant,
-          replacementLinuxCode: sourceDef.linuxEvdevName,
-          deliveredToTargetApp: true,
-          deliveryNote: 'Original mouse button delivered unchanged'
-        };
-        setDiagnosticLog((prev) => [record, ...prev].slice(0, 50));
-        setPojavLastAction(`Native Mouse Press: ${sourceDef.shortLabel} (Unmapped)`);
+      if (!masterEnabled || !matchedRule || backendMode === 'RESTRICTED_UNAVAILABLE') {
         return;
       }
 
@@ -455,13 +381,9 @@ export default function App() {
           replacementAndroidCode: sourceDef.androidMotionConstant,
           replacementLinuxCode: sourceDef.linuxEvdevName,
           deliveredToTargetApp: false,
-          deliveryNote:
-            'Stock Android dispatches Left/Right/Middle MotionEvents directly to foreground window'
+          deliveryNote: 'Switch to Hybrid uinput mode for Left/Right/Middle replacement'
         };
         setDiagnosticLog((prev) => [record, ...prev].slice(0, 50));
-        setPojavLastAction(
-          `Stock Android Limit: ${sourceDef.shortLabel} requires Hybrid uinput mode`
-        );
         return;
       }
 
@@ -497,28 +419,40 @@ export default function App() {
         rawLinuxEvdevConstant: sourceDef.linuxEvdevName,
         matchedRuleId: matchedRule.id,
         sourceSuppressed: true,
-        suppressionReason:
-          backendMode === 'HYBRID_UINPUT'
-            ? `Suppressed original ${sourceDef.linuxEvdevName} via ioctl(EVIOCGRAB)`
-            : `Suppressed ${sourceDef.androidFallbackKeyCode} via AccessibilityService.onKeyEvent() = true`,
+        suppressionReason: `Suppressed ${sourceDef.linuxEvdevName}`,
         replacementOutputLabel: `${fullTargetLabel} DOWN`,
         replacementAndroidCode: destDetails.androidCode,
         replacementLinuxCode: destDetails.linuxCode,
         deliveredToTargetApp: true,
-        deliveryNote:
-          backendMode === 'HYBRID_UINPUT'
-            ? `Injected ${destDetails.linuxCode} (ACTION_DOWN) via /dev/uinput`
-            : `Dispatched ${destDetails.androidCode} via KeyBridgeImeService`
+        deliveryNote: `Redirected ${sourceDef.shortLabel} → ${fullTargetLabel}`
       };
 
       setDiagnosticLog((prev) => [record, ...prev].slice(0, 50));
+      setLiveHudBanner(`Redirected: ${sourceDef.shortLabel} → ${fullTargetLabel}`);
 
       setPojavHeldKeys((prev) =>
         prev.includes(fullTargetLabel) ? prev : [...prev, fullTargetLabel]
       );
       setPojavLastAction(
-        `GLFW Key/Mouse Press: ${fullTargetLabel} [from ${sourceDef.shortLabel}]`
+        `Received: ${fullTargetLabel} [from ${sourceDef.shortLabel}]`
       );
+
+      // Dispatch a real synthesized KeyboardEvent to the active window/element
+      if (matchedRule.destinationType === 'KEYBOARD') {
+        const keyDef = getKeyboardInputById(matchedRule.destinationId);
+        if (keyDef) {
+          const synthEvent = new KeyboardEvent('keydown', {
+            key: keyDef.printableChar ?? keyDef.keyCap,
+            code: keyDef.domKeyCode,
+            ctrlKey: matchedRule.modifiers.includes('CTRL'),
+            shiftKey: matchedRule.modifiers.includes('SHIFT'),
+            altKey: matchedRule.modifiers.includes('ALT'),
+            metaKey: matchedRule.modifiers.includes('META'),
+            bubbles: true
+          });
+          (document.activeElement ?? window).dispatchEvent(synthEvent);
+        }
+      }
 
       if (destDetails.printableChar) {
         const charOut = matchedRule.modifiers.includes('SHIFT')
@@ -556,9 +490,7 @@ export default function App() {
         rawLinuxEvdevConstant: sourceDef.linuxEvdevName,
         matchedRuleId: existingHold.ruleId,
         sourceSuppressed: existingHold.suppressedOriginal,
-        suppressionReason: existingHold.suppressedOriginal
-          ? `Original ${sourceDef.linuxEvdevName} release suppressed`
-          : 'Unmapped release pass-through',
+        suppressionReason: `Original ${sourceDef.linuxEvdevName} release suppressed`,
         replacementOutputLabel: `${existingHold.resolvedTargetLabel} UP (${holdDurationMs}ms)`,
         replacementAndroidCode: existingHold.resolvedAndroidCode,
         replacementLinuxCode: existingHold.resolvedLinuxCode,
@@ -571,11 +503,99 @@ export default function App() {
         prev.filter((k) => k !== existingHold.resolvedTargetLabel)
       );
       setPojavLastAction(
-        `GLFW Release: ${existingHold.resolvedTargetLabel} (Held ${holdDurationMs}ms)`
+        `Released: ${existingHold.resolvedTargetLabel} (Held ${holdDurationMs}ms)`
       );
     },
     [activeHolds]
   );
+
+  // GLOBAL WINDOW-WIDE MOUSE REDIRECT LISTENER:
+  // Once a mapping is saved, clicking that mouse button ANYWHERE in the window redirects it into the target key!
+  // Clicking UI buttons (Add, Edit, Delete, Save, Next, Tabs) by hand with Left Click is preserved so you can always control the app.
+  useEffect(() => {
+    if (!masterEnabled || isWizardConfiguring) return;
+
+    const handleGlobalWindowMouseDown = (e: MouseEvent) => {
+      const mouseDef = getMouseInputByDomButton(e.button);
+      if (!mouseDef) return;
+
+      const matchedRule = mappings.find(
+        (m) => m.sourceMouseId === mouseDef.id && m.enabled
+      );
+      if (!matchedRule) return;
+
+      // Always allow clicking UI control buttons by hand with Left Click (button 0)
+      const targetEl = e.target as HTMLElement | null;
+      if (
+        e.button === 0 &&
+        targetEl?.closest('button, a, select, [data-ui-control="true"], [role="switch"]')
+      ) {
+        return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+      handlePhysicalMouseDown(mouseDef.id, 'Global Window Mouse Listener');
+    };
+
+    const handleGlobalWindowMouseUp = (e: MouseEvent) => {
+      const mouseDef = getMouseInputByDomButton(e.button);
+      if (!mouseDef) return;
+
+      const isCurrentlyHeld = activeHolds.some((h) => h.sourceMouseId === mouseDef.id);
+      if (!isCurrentlyHeld) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      handlePhysicalMouseUp(mouseDef.id, 'Global Window Mouse Listener');
+    };
+
+    const handleGlobalContextMenu = (e: MouseEvent) => {
+      const rightRule = mappings.find(
+        (m) => m.sourceMouseId === 'MOUSE_RIGHT' && m.enabled
+      );
+      if (rightRule) {
+        e.preventDefault();
+      }
+    };
+
+    const handleGlobalAuxClick = (e: MouseEvent) => {
+      const mouseDef = getMouseInputByDomButton(e.button);
+      if (!mouseDef) return;
+      const matchedRule = mappings.find(
+        (m) => m.sourceMouseId === mouseDef.id && m.enabled
+      );
+      if (matchedRule) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    window.addEventListener('mousedown', handleGlobalWindowMouseDown, { capture: true });
+    window.addEventListener('mouseup', handleGlobalWindowMouseUp, { capture: true });
+    window.addEventListener('contextmenu', handleGlobalContextMenu, { capture: true });
+    window.addEventListener('auxclick', handleGlobalAuxClick, { capture: true });
+
+    return () => {
+      window.removeEventListener('mousedown', handleGlobalWindowMouseDown, {
+        capture: true
+      });
+      window.removeEventListener('mouseup', handleGlobalWindowMouseUp, {
+        capture: true
+      });
+      window.removeEventListener('contextmenu', handleGlobalContextMenu, {
+        capture: true
+      });
+      window.removeEventListener('auxclick', handleGlobalAuxClick, { capture: true });
+    };
+  }, [
+    activeHolds,
+    handlePhysicalMouseDown,
+    handlePhysicalMouseUp,
+    isWizardConfiguring,
+    mappings,
+    masterEnabled
+  ]);
 
   // Export Complete Android Studio Project + Active Mappings JSON Bundle
   const handleExportAndroidBundle = () => {
@@ -600,14 +620,6 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const hasForwardToTRule = mappings.some(
-    (m) =>
-      m.sourceMouseId === 'MOUSE_FORWARD' &&
-      m.destinationType === 'KEYBOARD' &&
-      m.destinationId === 'KEY_T' &&
-      m.enabled
-  );
-
   const rootThemeClass = isDark
     ? 'bg-[#090D16] text-slate-100'
     : 'bg-slate-50 text-slate-900';
@@ -624,6 +636,14 @@ export default function App() {
         reduceMotion ? 'reduce-motion' : ''
       }`}
     >
+      {/* Floating Live Redirect HUD Pill when a mapped mouse button is clicked anywhere */}
+      {liveHudBanner && (
+        <div className="fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-xl bg-blue-600 text-white text-xs font-mono font-bold shadow-lg flex items-center gap-2 pointer-events-none">
+          <Zap className="w-4 h-4 text-amber-300" />
+          <span>{liveHudBanner}</span>
+        </div>
+      )}
+
       {/* Strict 3-Zone Top Navigation Bar */}
       <header
         className={`sticky top-0 z-30 backdrop-blur-md border-b px-4 sm:px-6 py-3.5 ${headerThemeClass}`}
@@ -632,6 +652,7 @@ export default function App() {
           {/* Zone 1: Single text element wordmark */}
           <a
             href="#workbench-top"
+            data-ui-control="true"
             onClick={(e) => {
               e.preventDefault();
               setActiveTab('WORKBENCH');
@@ -645,14 +666,13 @@ export default function App() {
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium">
             <a
               href="#workbench"
+              data-ui-control="true"
               onClick={(e) => {
                 e.preventDefault();
                 setActiveTab('WORKBENCH');
               }}
               className={`hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'WORKBENCH' ||
-                activeTab === 'APP_ONLY' ||
-                activeTab === 'VERIFIER_ONLY'
+                activeTab === 'WORKBENCH' || activeTab === 'APP_ONLY'
                   ? 'text-blue-400 font-semibold'
                   : mutedText
               }`}
@@ -661,6 +681,7 @@ export default function App() {
             </a>
             <a
               href="#verifier"
+              data-ui-control="true"
               onClick={(e) => {
                 e.preventDefault();
                 setActiveTab('VERIFIER_ONLY');
@@ -675,6 +696,7 @@ export default function App() {
             </a>
             <a
               href="#feasibility"
+              data-ui-control="true"
               onClick={(e) => {
                 e.preventDefault();
                 setActiveTab('FEASIBILITY');
@@ -689,6 +711,7 @@ export default function App() {
             </a>
             <a
               href="#source"
+              data-ui-control="true"
               onClick={(e) => {
                 e.preventDefault();
                 setActiveTab('SOURCE');
@@ -707,6 +730,7 @@ export default function App() {
           <div className="flex items-center shrink-0">
             <button
               type="button"
+              data-ui-control="true"
               onClick={handleExportAndroidBundle}
               className="min-h-[38px] px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-all active:scale-95 whitespace-nowrap shrink-0"
             >
@@ -723,7 +747,6 @@ export default function App() {
       >
         {/* Compact Workspace Toolbar & Mobile-Friendly View Switcher */}
         <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Segmented View Switcher (Adapts cleanly to narrow mobile screens & desktop) */}
           <div
             className={`flex flex-wrap items-center gap-1 p-1 rounded-xl border ${
               isDark
@@ -733,6 +756,7 @@ export default function App() {
           >
             <button
               type="button"
+              data-ui-control="true"
               onClick={() => setActiveTab('WORKBENCH')}
               className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
                 activeTab === 'WORKBENCH'
@@ -746,6 +770,7 @@ export default function App() {
 
             <button
               type="button"
+              data-ui-control="true"
               onClick={() => setActiveTab('APP_ONLY')}
               className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
                 activeTab === 'APP_ONLY'
@@ -759,6 +784,7 @@ export default function App() {
 
             <button
               type="button"
+              data-ui-control="true"
               onClick={() => setActiveTab('VERIFIER_ONLY')}
               className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
                 activeTab === 'VERIFIER_ONLY'
@@ -772,6 +798,7 @@ export default function App() {
 
             <button
               type="button"
+              data-ui-control="true"
               onClick={() => setActiveTab('FEASIBILITY')}
               className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
                 activeTab === 'FEASIBILITY'
@@ -785,6 +812,7 @@ export default function App() {
 
             <button
               type="button"
+              data-ui-control="true"
               onClick={() => setActiveTab('SOURCE')}
               className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-all whitespace-nowrap ${
                 activeTab === 'SOURCE'
@@ -797,10 +825,10 @@ export default function App() {
             </button>
           </div>
 
-          {/* Right Utility Controls: Theme Switch + Restore Defaults */}
           <div className="flex items-center gap-2">
             <button
               type="button"
+              data-ui-control="true"
               onClick={() => setIsDark(!isDark)}
               aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
               className={`min-h-[38px] px-3 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-all active:scale-95 ${
@@ -822,165 +850,73 @@ export default function App() {
               )}
             </button>
 
-            <button
-              type="button"
-              onClick={handleResetDefaultMappings}
-              className={`min-h-[38px] px-3 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-all active:scale-95 ${
-                isDark
-                  ? 'bg-[#0F1623] border-slate-800 text-slate-300 hover:bg-slate-800'
-                  : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
-              }`}
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Restore Example Mappings</span>
-              <span className="sm:hidden">Reset</span>
-            </button>
+            {mappings.length > 0 && (
+              <button
+                type="button"
+                data-ui-control="true"
+                onClick={handleClearAllMappings}
+                className={`min-h-[38px] px-3 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-all active:scale-95 ${
+                  isDark
+                    ? 'bg-[#0F1623] border-slate-800 text-red-400 hover:bg-red-950/40'
+                    : 'bg-white border-slate-300 text-red-600 hover:bg-red-50'
+                }`}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear All</span>
+              </button>
+            )}
           </div>
         </div>
 
         {/* Active View Content */}
         {activeTab === 'WORKBENCH' && (
-          <div className="space-y-10">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              <div className="lg:col-span-5">
-                <MinimalAndroidApp
-                  isDark={isDark}
-                  onToggleTheme={() => setIsDark(!isDark)}
-                  reduceMotion={reduceMotion}
-                  onToggleReduceMotion={() => setReduceMotion(!reduceMotion)}
-                  showTechnicalCodes={showTechnicalCodes}
-                  onToggleTechnicalCodes={() =>
-                    setShowTechnicalCodes(!showTechnicalCodes)
-                  }
-                  masterEnabled={masterEnabled}
-                  onToggleMaster={setMasterEnabled}
-                  backendMode={backendMode}
-                  onChangeBackendMode={setBackendMode}
-                  mappings={mappings}
-                  onSaveMapping={handleSaveMapping}
-                  onToggleRuleEnabled={handleToggleRuleEnabled}
-                  onDeleteMapping={handleDeleteMapping}
-                  connectedMice={connectedMice}
-                  onConnectMouse={handleConnectMouse}
-                  onDisconnectMouse={handleDisconnectMouse}
-                  onSimulatePhoneReboot={handleSimulatePhoneReboot}
-                  appUiClosed={appUiClosed}
-                  onToggleAppUiClosed={setAppUiClosed}
-                  lastLifecycleMessage={lastLifecycleMessage}
-                />
-              </div>
-
-              <div className="lg:col-span-7">
-                <DiagnosticVerifier
-                  isDark={isDark}
-                  masterEnabled={masterEnabled}
-                  backendMode={backendMode}
-                  mappings={mappings}
-                  connectedMice={connectedMice}
-                  activeHolds={activeHolds}
-                  diagnosticLog={diagnosticLog}
-                  onPhysicalMouseDown={handlePhysicalMouseDown}
-                  onPhysicalMouseUp={handlePhysicalMouseUp}
-                  onClearDiagnosticLog={() => setDiagnosticLog([])}
-                  targetSandboxBuffer={targetSandboxBuffer}
-                  onClearSandboxBuffer={() => setTargetSandboxBuffer('')}
-                  pojavLastAction={pojavLastAction}
-                  pojavHeldKeys={pojavHeldKeys}
-                />
-              </div>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            <div className="lg:col-span-5">
+              <MinimalAndroidApp
+                isDark={isDark}
+                onToggleTheme={() => setIsDark(!isDark)}
+                reduceMotion={reduceMotion}
+                onToggleReduceMotion={() => setReduceMotion(!reduceMotion)}
+                showTechnicalCodes={showTechnicalCodes}
+                onToggleTechnicalCodes={() => setShowTechnicalCodes(!showTechnicalCodes)}
+                masterEnabled={masterEnabled}
+                onToggleMaster={setMasterEnabled}
+                backendMode={backendMode}
+                onChangeBackendMode={setBackendMode}
+                mappings={mappings}
+                onSaveMapping={handleSaveMapping}
+                onToggleRuleEnabled={handleToggleRuleEnabled}
+                onDeleteMapping={handleDeleteMapping}
+                connectedMice={connectedMice}
+                onConnectMouse={handleConnectMouse}
+                onDisconnectMouse={handleDisconnectMouse}
+                onSimulatePhoneReboot={handleSimulatePhoneReboot}
+                appUiClosed={appUiClosed}
+                onToggleAppUiClosed={setAppUiClosed}
+                lastLifecycleMessage={lastLifecycleMessage}
+                onWizardStateChange={setIsWizardConfiguring}
+              />
             </div>
 
-            {/* Acceptance Criteria Verification Matrix */}
-            <section
-              className={`rounded-2xl border p-5 sm:p-6 space-y-4 ${
-                isDark
-                  ? 'bg-[#0F1623] border-slate-800 text-slate-100'
-                  : 'bg-white border-slate-200 text-slate-900'
-              }`}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-base sm:text-lg font-bold">
-                    Acceptance Criteria & Workflow Status
-                  </h2>
-                  <p className={`text-xs ${mutedText}`}>
-                    Core workflow: Open app → Select source input → Select replacement input → Save → Enable remapping.
-                  </p>
-                </div>
-                <span className="text-xs font-mono text-emerald-400">
-                  8 / 8 Requirements Verified
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                {[
-                  {
-                    num: '01.',
-                    title: 'Configure without a connected mouse',
-                    status: 'Starts with 0 mice attached; full visual button/key selectors work offline.'
-                  },
-                  {
-                    num: '02.',
-                    title: 'Create Mouse Forward → Keyboard T in a few taps',
-                    status: hasForwardToTRule
-                      ? 'Active in Saved Mappings (Mouse Forward → Keyboard T).'
-                      : 'Tap Add Mapping → Mouse Forward → T → Save.'
-                  },
-                  {
-                    num: '03.',
-                    title: 'Persistent local DataStore settings',
-                    status: `${mappings.length} rule(s) persisted locally across closes, disconnects, and reboots.`
-                  },
-                  {
-                    num: '04.',
-                    title: 'Continue operating when app UI is closed',
-                    status: appUiClosed
-                      ? 'App UI is currently closed while background service processes input.'
-                      : 'RemapperForegroundService runs independently of Activity UI.'
-                  },
-                  {
-                    num: '05.',
-                    title: 'Universal USB OTG & Bluetooth HID mouse support',
-                    status:
-                      connectedMice.length > 0
-                        ? `${connectedMice.length} compatible HID mouse connected dynamically.`
-                        : 'No hardcoded vendor/product IDs; discovers any SOURCE_MOUSE device.'
-                  },
-                  {
-                    num: '06.',
-                    title: 'Automatic activation on mouse connection',
-                    status: 'InputDeviceListener applies saved mappings immediately upon hotplug.'
-                  },
-                  {
-                    num: '07.',
-                    title: 'PojavLauncher (Minecraft Java) & external app compatibility',
-                    status: 'Hybrid uinput emits hardware EV_KEY frames compatible with Pointer Capture.'
-                  },
-                  {
-                    num: '08.',
-                    title: 'Survive phone restart & prevent stuck keys',
-                    status: 'BootCompletedReceiver restores service; disconnect watchdog releases held keys.'
-                  }
-                ].map((item) => (
-                  <div
-                    key={item.num}
-                    className={`p-3 rounded-xl border flex items-start gap-2.5 ${
-                      isDark
-                        ? 'bg-[#151E2E] border-slate-800/90'
-                        : 'bg-slate-50 border-slate-200'
-                    }`}
-                  >
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                    <div className="space-y-0.5">
-                      <div className="text-xs font-bold">
-                        {item.num} {item.title}
-                      </div>
-                      <div className={`text-xs ${mutedText}`}>{item.status}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
+            <div className="lg:col-span-7">
+              <DiagnosticVerifier
+                isDark={isDark}
+                masterEnabled={masterEnabled}
+                backendMode={backendMode}
+                mappings={mappings}
+                connectedMice={connectedMice}
+                activeHolds={activeHolds}
+                diagnosticLog={diagnosticLog}
+                onPhysicalMouseDown={handlePhysicalMouseDown}
+                onPhysicalMouseUp={handlePhysicalMouseUp}
+                onClearDiagnosticLog={() => setDiagnosticLog([])}
+                targetSandboxBuffer={targetSandboxBuffer}
+                onChangeSandboxBuffer={setTargetSandboxBuffer}
+                onClearSandboxBuffer={() => setTargetSandboxBuffer('')}
+                pojavLastAction={pojavLastAction}
+                pojavHeldKeys={pojavHeldKeys}
+              />
+            </div>
           </div>
         )}
 
@@ -1008,6 +944,7 @@ export default function App() {
               appUiClosed={appUiClosed}
               onToggleAppUiClosed={setAppUiClosed}
               lastLifecycleMessage={lastLifecycleMessage}
+              onWizardStateChange={setIsWizardConfiguring}
             />
           </div>
         )}
@@ -1025,6 +962,7 @@ export default function App() {
             onPhysicalMouseUp={handlePhysicalMouseUp}
             onClearDiagnosticLog={() => setDiagnosticLog([])}
             targetSandboxBuffer={targetSandboxBuffer}
+            onChangeSandboxBuffer={setTargetSandboxBuffer}
             onClearSandboxBuffer={() => setTargetSandboxBuffer('')}
             pojavLastAction={pojavLastAction}
             pojavHeldKeys={pojavHeldKeys}

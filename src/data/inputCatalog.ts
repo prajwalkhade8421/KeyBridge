@@ -628,35 +628,5 @@ export function getDestinationDetails(type: DestinationType, id: string): {
   };
 }
 
-export const DEFAULT_INITIAL_MAPPINGS: MappingRule[] = [
-  {
-    id: 'rule-forward-to-t',
-    sourceMouseId: 'MOUSE_FORWARD',
-    destinationType: 'KEYBOARD',
-    destinationId: 'KEY_T',
-    modifiers: [],
-    enabled: true,
-    createdAt: 1729728000000,
-    updatedAt: 1729728000000
-  },
-  {
-    id: 'rule-back-to-g',
-    sourceMouseId: 'MOUSE_BACK',
-    destinationType: 'KEYBOARD',
-    destinationId: 'KEY_G',
-    modifiers: [],
-    enabled: true,
-    createdAt: 1729728060000,
-    updatedAt: 1729728060000
-  },
-  {
-    id: 'rule-middle-to-right',
-    sourceMouseId: 'MOUSE_MIDDLE',
-    destinationType: 'MOUSE',
-    destinationId: 'MOUSE_RIGHT',
-    modifiers: [],
-    enabled: true,
-    createdAt: 1729728120000,
-    updatedAt: 1729728120000
-  }
-];
+export const DEFAULT_INITIAL_MAPPINGS: MappingRule[] = [];
+

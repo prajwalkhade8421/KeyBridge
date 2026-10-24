@@ -65,6 +65,7 @@ interface MinimalAndroidAppProps {
   appUiClosed: boolean;
   onToggleAppUiClosed: (closed: boolean) => void;
   lastLifecycleMessage: string | null;
+  onWizardStateChange?: (isConfiguring: boolean) => void;
 }
 
 const MOUSE_GROUPS: MouseButtonGroup[] = [
@@ -104,24 +105,30 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
   onSimulatePhoneReboot,
   appUiClosed,
   onToggleAppUiClosed,
-  lastLifecycleMessage
+  lastLifecycleMessage,
+  onWizardStateChange
 }) => {
   const [screen, setScreen] = useState<'MAIN' | 'ADD_EDIT'>('MAIN');
+  const [wizardStep, setWizardStep] = useState<1 | 2>(1);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
-  const [hardwareBarExpanded, setHardwareBarExpanded] = useState<boolean>(true);
+  const [hardwareBarExpanded, setHardwareBarExpanded] = useState<boolean>(false);
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
 
-  // Persistent draft state so navigating back and forth preserves user's selections
-  const [sourceMouseId, setSourceMouseId] = useState<string>('MOUSE_FORWARD');
+  // Selection state inside the 2-step flow
+  const [sourceMouseId, setSourceMouseId] = useState<string | null>(null);
   const [destinationType, setDestinationType] = useState<DestinationType>('KEYBOARD');
   const [selectedKeyCategory, setSelectedKeyCategory] =
     useState<KeyboardCategory>('Letters A–Z');
-  const [destinationId, setDestinationId] = useState<string>('KEY_T');
+  const [destinationId, setDestinationId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierKey[]>([]);
   const [keySearchQuery, setKeySearchQuery] = useState<string>('');
-  const [captureTarget, setCaptureTarget] = useState<'NONE' | 'SOURCE' | 'DESTINATION'>('NONE');
+  const [lastCapturedFlash, setLastCapturedFlash] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [confirmationToast, setConfirmationToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    onWizardStateChange?.(screen === 'ADD_EDIT');
+  }, [screen, onWizardStateChange]);
 
   const triggerToast = (msg: string) => {
     setConfirmationToast(msg);
@@ -133,15 +140,27 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
     return () => clearTimeout(timer);
   }, [confirmationToast]);
 
-  // Open Add Mapping screen (preserving previous draft selections if user was already configuring)
+  useEffect(() => {
+    if (!lastCapturedFlash) return;
+    const timer = setTimeout(() => setLastCapturedFlash(null), 1200);
+    return () => clearTimeout(timer);
+  }, [lastCapturedFlash]);
+
+  // Open + Add Mapping: starts at Step 1 (Listening for physical mouse click or manual selection)
   const handleOpenAdd = () => {
     setEditingRuleId(null);
-    setCaptureTarget('NONE');
+    setSourceMouseId(null);
+    setDestinationType('KEYBOARD');
+    setSelectedKeyCategory('Letters A–Z');
+    setDestinationId(null);
+    setModifiers([]);
+    setKeySearchQuery('');
     setFormError(null);
+    setWizardStep(1);
     setScreen('ADD_EDIT');
   };
 
-  // Open Edit Mapping screen populated with rule values
+  // Open Edit Mapping populated with rule values
   const handleOpenEdit = (rule: MappingRule) => {
     setEditingRuleId(rule.id);
     setSourceMouseId(rule.sourceMouseId);
@@ -155,67 +174,104 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
     setDestinationId(rule.destinationId);
     setModifiers(rule.modifiers);
     setKeySearchQuery('');
-    setCaptureTarget('NONE');
     setFormError(null);
+    setWizardStep(1);
     setScreen('ADD_EDIT');
   };
 
-  // Handle switching between Keyboard and Mouse destination types
-  const handleChangeDestinationType = (nextType: DestinationType) => {
-    setDestinationType(nextType);
-    setFormError(null);
-    setCaptureTarget('NONE');
-    if (nextType === 'KEYBOARD') {
-      if (!destinationId.startsWith('KEY_')) {
-        setDestinationId('KEY_T');
-        setSelectedKeyCategory('Letters A–Z');
-      }
-    } else {
-      if (!destinationId.startsWith('MOUSE_')) {
-        setDestinationId(sourceMouseId === 'MOUSE_LEFT' ? 'MOUSE_RIGHT' : 'MOUSE_LEFT');
-      }
-    }
-  };
-
-  // Optional physical keyboard key capture listener
+  // STEP 1 AUTOMATIC MOUSE BUTTON CAPTURE:
+  // When in Step 1, clicking any non-primary mouse button (Right, Middle, Back/Btn 4, Forward/Btn 5) anywhere
+  // or clicking inside the capture zone immediately selects that mouse button!
+  // Clicking UI control buttons (like "Next", "Cancel", or manual cards) with Left Click works normally by hand.
   useEffect(() => {
-    if (captureTarget === 'NONE') return;
+    if (screen !== 'ADD_EDIT' || wizardStep !== 1) return;
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (captureTarget === 'DESTINATION' && destinationType === 'KEYBOARD') {
+    const handleGlobalStep1MouseDown = (e: MouseEvent) => {
+      const targetEl = e.target as HTMLElement | null;
+      const isUiButton = targetEl?.closest('[data-ui-control="true"]');
+
+      // If the user clicked a UI control button with Left Click (button 0), let the button click run normally
+      if (isUiButton && e.button === 0) {
+        return;
+      }
+
+      // Otherwise, capture the physical mouse button!
+      const matchedMouse = getMouseInputByDomButton(e.button);
+      if (matchedMouse) {
         e.preventDefault();
         e.stopPropagation();
-        const matched = getKeyboardInputByDomCode(e.code);
-        if (matched) {
-          setSelectedKeyCategory(matched.category);
-          setDestinationId(matched.id);
-          setCaptureTarget('NONE');
-          setFormError(null);
-        }
+        setSourceMouseId(matchedMouse.id);
+        setFormError(null);
+        setLastCapturedFlash(`Captured: ${matchedMouse.shortLabel}`);
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown, { capture: true });
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+    const SuppressContextMenu = (e: MouseEvent) => {
+      const targetEl = e.target as HTMLElement | null;
+      if (!targetEl?.closest('[data-ui-control="true"]')) {
+        e.preventDefault();
+      }
     };
-  }, [captureTarget, destinationType]);
 
-  const handleCaptureBoxMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    window.addEventListener('mousedown', handleGlobalStep1MouseDown, { capture: true });
+    window.addEventListener('contextmenu', SuppressContextMenu, { capture: true });
+    return () => {
+      window.removeEventListener('mousedown', handleGlobalStep1MouseDown, { capture: true });
+      window.removeEventListener('contextmenu', SuppressContextMenu, { capture: true });
+    };
+  }, [screen, wizardStep]);
+
+  // STEP 2 AUTOMATIC KEYBOARD KEY CAPTURE:
+  // When in Step 2 and Destination Type is KEYBOARD, pressing ANY key on the physical keyboard
+  // (like 'T') immediately selects that key!
+  useEffect(() => {
+    if (screen !== 'ADD_EDIT' || wizardStep !== 2 || destinationType !== 'KEYBOARD') return;
+
+    const handleGlobalStep2KeyDown = (e: KeyboardEvent) => {
+      const targetEl = e.target as HTMLElement | null;
+      if (targetEl && (targetEl.tagName === 'INPUT' || targetEl.tagName === 'TEXTAREA')) {
+        return; // Allow typing in the optional search filter box
+      }
+
+      const matchedKey = getKeyboardInputByDomCode(e.code);
+      if (matchedKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSelectedKeyCategory(matchedKey.category);
+        setDestinationId(matchedKey.id);
+        setFormError(null);
+        setLastCapturedFlash(`Captured Key: ${matchedKey.shortLabel}`);
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalStep2KeyDown, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', handleGlobalStep2KeyDown, { capture: true });
+    };
+  }, [screen, wizardStep, destinationType]);
+
+  // Capture pad click handler for Step 1 or Step 2 (Mouse mode)
+  const handleCaptureZonePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
     const matchedMouse = getMouseInputByDomButton(e.button);
     if (!matchedMouse) return;
 
-    if (captureTarget === 'SOURCE') {
+    if (wizardStep === 1) {
       setSourceMouseId(matchedMouse.id);
-      setCaptureTarget('NONE');
       setFormError(null);
-    } else if (captureTarget === 'DESTINATION' && destinationType === 'MOUSE') {
+      setLastCapturedFlash(`Captured: ${matchedMouse.shortLabel}`);
+    } else if (wizardStep === 2 && destinationType === 'MOUSE') {
       setDestinationId(matchedMouse.id);
-      setCaptureTarget('NONE');
       setFormError(null);
+      setLastCapturedFlash(`Captured Target: ${matchedMouse.shortLabel}`);
     }
+  };
+
+  const handleChangeDestinationType = (nextType: DestinationType) => {
+    setDestinationType(nextType);
+    setDestinationId(null);
+    setFormError(null);
   };
 
   const toggleModifier = (mod: ModifierKey) => {
@@ -224,8 +280,34 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
     );
   };
 
+  const handleProceedToStep2 = () => {
+    if (!sourceMouseId) {
+      setFormError('Click any button on your mouse or select a button below first.');
+      return;
+    }
+    setFormError(null);
+    setWizardStep(2);
+  };
+
   const handleSaveForm = () => {
-    if (destinationType === 'MOUSE' && sourceMouseId === destinationId && modifiers.length === 0) {
+    if (!sourceMouseId) {
+      setFormError('Please select a source mouse button.');
+      setWizardStep(1);
+      return;
+    }
+    if (!destinationId) {
+      setFormError(
+        destinationType === 'KEYBOARD'
+          ? 'Press any key on your keyboard (e.g. T) or tap a key below first.'
+          : 'Click or tap a replacement mouse button first.'
+      );
+      return;
+    }
+    if (
+      destinationType === 'MOUSE' &&
+      sourceMouseId === destinationId &&
+      modifiers.length === 0
+    ) {
       setFormError(
         'Invalid mapping: Source and destination cannot be the same mouse button without a modifier.'
       );
@@ -247,22 +329,10 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
       editingRuleId ?? undefined
     );
 
-    triggerToast(`Saved: ${srcShort} → ${modPrefix}${dstShort}`);
+    triggerToast(`Saved & Active: ${srcShort} → ${modPrefix}${dstShort}`);
     setScreen('MAIN');
   };
 
-  const handleQuickPresetForwardToT = () => {
-    onSaveMapping({
-      sourceMouseId: 'MOUSE_FORWARD',
-      destinationType: 'KEYBOARD',
-      destinationId: 'KEY_T',
-      modifiers: [],
-      enabled: true
-    });
-    triggerToast('Saved: Mouse Forward → Keyboard T');
-  };
-
-  // Filtered keyboard keys for rapid selection
   const displayedKeyboardKeys = useMemo(() => {
     const query = keySearchQuery.trim().toLowerCase();
     if (query.length > 0) {
@@ -276,8 +346,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
     return KEYBOARD_INPUT_CATALOG.filter((k) => k.category === selectedKeyCategory);
   }, [keySearchQuery, selectedKeyCategory]);
 
-  // Compute honest, accurate status indicator
-  // Rule: NEVER display a green Active status if the remapping backend is not functioning or no mouse is connected.
+  // Honest status indicator
   const statusIndicator = useMemo(() => {
     const enabledMappingsCount = mappings.filter((m) => m.enabled).length;
     const stockRestrictedCount = mappings.filter((m) => {
@@ -289,8 +358,10 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
     if (!masterEnabled) {
       return {
         tone: 'INACTIVE' as const,
-        headline: 'Remapping Off',
-        subtext: `${mappings.length} saved mapping${mappings.length === 1 ? '' : 's'} stored locally. Enable the master toggle to start the service.`,
+        headline: 'Remapping Paused',
+        subtext: `${mappings.length} mapping${
+          mappings.length === 1 ? '' : 's'
+        } saved. Turn on Master Remapping to intercept mouse inputs.`,
         actionLabel: null
       };
     }
@@ -305,54 +376,41 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
       };
     }
 
-    if (connectedMice.length === 0) {
+    if (mappings.length === 0) {
       return {
         tone: 'WAITING' as const,
-        headline: 'Waiting for Mouse',
-        subtext: `${enabledMappingsCount} enabled mapping${
-          enabledMappingsCount === 1 ? '' : 's'
-        } saved and ready. Will activate automatically when any USB or Bluetooth mouse connects.`,
+        headline: 'Ready · No Mappings Configured',
+        subtext:
+          'Click + Add Mapping below, click any mouse button, press Next, and press a keyboard key to start.',
         actionLabel: null
       };
     }
 
-    if (backendMode === 'STOCK_ACCESSIBILITY') {
-      if (stockRestrictedCount > 0) {
-        return {
-          tone: 'WARNING' as const,
-          headline: `Partial Mode · ${connectedMice.length} Mouse Connected`,
-          subtext: `AccessibilityService is active for Back/Forward buttons, but ${stockRestrictedCount} mapping${
-            stockRestrictedCount === 1 ? '' : 's'
-          } (Left/Right/Middle) require Root/Shizuku uinput mode.`,
-          actionLabel: 'Switch to Hybrid uinput'
-        };
-      }
+    if (backendMode === 'STOCK_ACCESSIBILITY' && stockRestrictedCount > 0) {
       return {
-        tone: 'ACTIVE' as const,
-        headline: `Active · ${connectedMice.length} Mouse Connected`,
-        subtext: `Stock Accessibility + IME bridge is actively remapping ${enabledMappingsCount} side-button rule${
-          enabledMappingsCount === 1 ? '' : 's'
-        }.`,
-        actionLabel: null
+        tone: 'WARNING' as const,
+        headline: 'Partial Stock Mode',
+        subtext: `AccessibilityService intercepts Back/Forward buttons, but ${stockRestrictedCount} rule${
+          stockRestrictedCount === 1 ? '' : 's'
+        } (Left/Right/Middle) require Hybrid Root/Shizuku uinput mode.`,
+        actionLabel: 'Enable Hybrid uinput'
       };
     }
 
-    // HYBRID_UINPUT + connectedMice > 0 + masterEnabled
     return {
       tone: 'ACTIVE' as const,
-      headline: `Active · ${connectedMice.length} Mouse Connected`,
-      subtext: `${enabledMappingsCount} of ${mappings.length} saved mapping${
-        mappings.length === 1 ? '' : 's'
-      } actively applied via kernel uinput.`,
+      headline: `Active · Global Window & Service Interception On`,
+      subtext: `${enabledMappingsCount} active mapping${
+        enabledMappingsCount === 1 ? '' : 's'
+      } redirecting input live anywhere in the window.`,
       actionLabel: null
     };
-  }, [backendMode, connectedMice.length, mappings, masterEnabled]);
+  }, [backendMode, mappings, masterEnabled]);
 
-  const duplicateSourceRule = mappings.find(
-    (m) => m.sourceMouseId === sourceMouseId && m.id !== editingRuleId
-  );
+  const duplicateSourceRule = sourceMouseId
+    ? mappings.find((m) => m.sourceMouseId === sourceMouseId && m.id !== editingRuleId)
+    : undefined;
 
-  // Surface color tokens based on Dark (Primary) or Light theme
   const shellBg = isDark
     ? 'bg-[#0F1623] border-slate-800 text-slate-100'
     : 'bg-white border-slate-200 text-slate-900';
@@ -367,7 +425,6 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Native Android Utility Device Surface */}
       <div
         className={`rounded-2xl border overflow-hidden shadow-xl transition-colors duration-150 ${shellBg}`}
       >
@@ -379,15 +436,15 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               : 'bg-slate-100 border-slate-200 text-slate-600'
           }`}
         >
-          <span>KeyBridge · Native Android Utility</span>
+          <span>KeyBridge · Input Remapper</span>
           <span>
-            {connectedMice.length > 0
-              ? `HID Connected (${connectedMice.length})`
-              : 'No Mouse Attached'}
+            {masterEnabled && mappings.some((m) => m.enabled)
+              ? 'Global Redirect: ACTIVE'
+              : 'Standby'}
           </span>
         </div>
 
-        {/* Compact App Header Bar */}
+        {/* App Header Bar */}
         <div
           className={`px-5 py-3.5 flex items-center justify-between gap-3 border-b ${
             isDark ? 'border-slate-800/80' : 'border-slate-200'
@@ -397,13 +454,19 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
             {screen === 'ADD_EDIT' ? (
               <button
                 type="button"
+                data-ui-control="true"
                 onClick={() => {
-                  setCaptureTarget('NONE');
-                  setScreen('MAIN');
+                  if (wizardStep === 2) {
+                    setWizardStep(1);
+                  } else {
+                    setScreen('MAIN');
+                  }
                 }}
-                aria-label="Back to saved mappings"
+                aria-label="Back"
                 className={`min-h-[40px] min-w-[40px] -ml-1.5 rounded-xl flex items-center justify-center transition-colors active:scale-95 ${
-                  isDark ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                  isDark
+                    ? 'hover:bg-slate-800 text-slate-200'
+                    : 'hover:bg-slate-100 text-slate-700'
                 }`}
               >
                 <ChevronLeft className="w-5 h-5" />
@@ -417,20 +480,23 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               <h2 className="text-base font-bold tracking-tight truncate">
                 {screen === 'MAIN'
                   ? 'KeyBridge'
-                  : editingRuleId
-                  ? 'Edit Mapping'
-                  : 'New Mapping'}
+                  : wizardStep === 1
+                  ? 'Step 1 of 2 · Select Mouse Input'
+                  : 'Step 2 of 2 · Select Replacement Key'}
               </h2>
               <p className={`text-xs truncate ${mutedText}`}>
                 {screen === 'MAIN'
-                  ? 'Hardware Mouse Input Remapper'
-                  : 'Select source mouse button and replacement output'}
+                  ? 'Hardware Mouse-to-Key & Mouse Remapper'
+                  : wizardStep === 1
+                  ? 'Click any button on your mouse or select below, then click Next'
+                  : 'Press any key on your keyboard (e.g. T) or select below, then click Save'}
               </p>
             </div>
           </div>
 
           <button
             type="button"
+            data-ui-control="true"
             onClick={() => setSettingsOpen(!settingsOpen)}
             aria-label="Open settings and permissions"
             aria-expanded={settingsOpen}
@@ -446,9 +512,10 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
           </button>
         </div>
 
-        {/* Collapsible Settings & Permissions Sheet inside the App */}
+        {/* Collapsible Settings & Permissions Sheet */}
         {settingsOpen && (
           <div
+            data-ui-control="true"
             className={`p-4 border-b space-y-4 transition-all ${
               isDark
                 ? 'bg-[#111827] border-slate-800 text-slate-200'
@@ -461,19 +528,21 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               </span>
               <button
                 type="button"
+                data-ui-control="true"
                 onClick={() => setSettingsOpen(false)}
                 className={`text-xs font-medium px-2 py-1 rounded-md ${
-                  isDark ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-200 text-slate-600'
+                  isDark
+                    ? 'hover:bg-slate-800 text-slate-400'
+                    : 'hover:bg-slate-200 text-slate-600'
                 }`}
               >
                 Done
               </button>
             </div>
 
-            {/* Backend Privilege Selector */}
             <div className="space-y-1.5">
               <label className={`block text-xs ${mutedText}`}>
-                Android Interception Backend (Simulates device privilege state)
+                Android Interception Backend
               </label>
               <div className="grid grid-cols-1 gap-1.5">
                 {[
@@ -485,7 +554,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                   {
                     id: 'STOCK_ACCESSIBILITY' as const,
                     title: 'Stock Android (AccessibilityService + IME)',
-                    desc: 'Unrooted fallback. Intercepts Mouse Back/Forward KeyEvents only; raw Left/Right/Middle restricted by OS.'
+                    desc: 'Unrooted fallback. Intercepts Mouse Back/Forward KeyEvents only.'
                   },
                   {
                     id: 'RESTRICTED_UNAVAILABLE' as const,
@@ -498,6 +567,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                     <button
                       key={opt.id}
                       type="button"
+                      data-ui-control="true"
                       onClick={() => onChangeBackendMode(opt.id)}
                       className={`w-full text-left p-2.5 rounded-xl border transition-all flex items-start justify-between gap-3 ${
                         selected
@@ -511,7 +581,9 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                     >
                       <div className="space-y-0.5">
                         <div className="text-xs font-semibold">{opt.title}</div>
-                        <div className={`text-[11px] leading-snug ${mutedText}`}>{opt.desc}</div>
+                        <div className={`text-[11px] leading-snug ${mutedText}`}>
+                          {opt.desc}
+                        </div>
                       </div>
                       <div
                         className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${
@@ -528,10 +600,10 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               </div>
             </div>
 
-            {/* Display & Accessibility Toggles */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
               <button
                 type="button"
+                data-ui-control="true"
                 onClick={onToggleTheme}
                 className={`min-h-[40px] px-3 py-2 rounded-xl border text-xs font-medium flex items-center justify-between ${elevatedBg}`}
               >
@@ -542,6 +614,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               </button>
               <button
                 type="button"
+                data-ui-control="true"
                 onClick={onToggleTechnicalCodes}
                 className={`min-h-[40px] px-3 py-2 rounded-xl border text-xs font-medium flex items-center justify-between ${elevatedBg}`}
               >
@@ -552,6 +625,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               </button>
               <button
                 type="button"
+                data-ui-control="true"
                 onClick={onToggleReduceMotion}
                 className={`min-h-[40px] px-3 py-2 rounded-xl border text-xs font-medium flex items-center justify-between ${elevatedBg}`}
               >
@@ -573,6 +647,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
             </span>
             <button
               type="button"
+              data-ui-control="true"
               onClick={() => setConfirmationToast(null)}
               className="text-blue-100 hover:text-white"
             >
@@ -581,7 +656,6 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
           </div>
         )}
 
-        {/* Body Content: App UI Closed State vs Main Screen vs Add/Edit Mapping Screen */}
         {appUiClosed ? (
           <div className="p-8 text-center space-y-4">
             <div className="w-12 h-12 rounded-2xl bg-blue-600/15 border border-blue-500/30 flex items-center justify-center mx-auto">
@@ -591,12 +665,13 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               <h3 className="text-base font-bold">App UI Closed · Service Running</h3>
               <p className={`text-xs leading-relaxed ${mutedText}`}>
                 {masterEnabled
-                  ? 'KeyBridge UI is closed, but RemapperForegroundService continues running in the background. Saved mappings remain active for connected mice.'
+                  ? 'KeyBridge UI is closed, and your saved mappings continue redirecting mouse inputs in the background across the window.'
                   : 'Master remapping is paused. Your saved mappings remain stored safely in Jetpack DataStore.'}
               </p>
             </div>
             <button
               type="button"
+              data-ui-control="true"
               onClick={() => onToggleAppUiClosed(false)}
               className="min-h-[44px] px-5 py-2.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-xl transition-all active:scale-95"
             >
@@ -604,10 +679,11 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
             </button>
           </div>
         ) : screen === 'MAIN' ? (
-          /* ================= SCREEN 1: REFINED MAIN SCREEN ================= */
+          /* ================= SCREEN 1: MAIN SCREEN ================= */
           <div className="p-5 space-y-5">
             {/* Master Remapping Toggle Card */}
             <div
+              data-ui-control="true"
               onClick={() => onToggleMaster(!masterEnabled)}
               role="switch"
               aria-checked={masterEnabled}
@@ -630,12 +706,11 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                 <div className="text-sm font-bold">Master Remapping</div>
                 <div className={`text-xs ${mutedText}`}>
                   {masterEnabled
-                    ? 'Automatically applies saved mappings when a mouse is connected'
-                    : 'Remapping is disabled · Mappings remain saved'}
+                    ? 'Redirecting configured mouse inputs globally across the window & service'
+                    : 'Remapping is paused · Saved mappings remain stored'}
                 </div>
               </div>
 
-              {/* Animated Native Android Material 3 Switch */}
               <div
                 className={`w-12 h-7 rounded-full p-1 transition-colors duration-200 flex items-center shrink-0 ${
                   masterEnabled
@@ -653,7 +728,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               </div>
             </div>
 
-            {/* Honest, Concise Status Indicator */}
+            {/* Concise Status Indicator */}
             <div
               className={`p-3.5 rounded-xl border flex items-start justify-between gap-3 ${
                 statusIndicator.tone === 'ACTIVE'
@@ -699,8 +774,9 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               {statusIndicator.actionLabel && (
                 <button
                   type="button"
+                  data-ui-control="true"
                   onClick={() => {
-                    if (statusIndicator.actionLabel === 'Switch to Hybrid uinput') {
+                    if (statusIndicator.actionLabel === 'Enable Hybrid uinput') {
                       onChangeBackendMode('HYBRID_UINPUT');
                       triggerToast('Switched to Hybrid Root/Shizuku uinput mode');
                     } else {
@@ -714,7 +790,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               )}
             </div>
 
-            {/* Saved Mappings List Header + Prominent Add Mapping Button */}
+            {/* Saved Mappings Section */}
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <div>
@@ -722,12 +798,13 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                     Saved Mappings ({mappings.length})
                   </h3>
                   <p className={`text-xs ${mutedText}`}>
-                    Persisted locally · Works independently of mouse connection
+                    Configured by you · Stored permanently on device
                   </p>
                 </div>
 
                 <button
                   type="button"
+                  data-ui-control="true"
                   onClick={handleOpenAdd}
                   className="min-h-[42px] inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-all active:scale-95 whitespace-nowrap shrink-0 shadow-xs"
                 >
@@ -736,7 +813,6 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                 </button>
               </div>
 
-              {/* Empty State vs Saved Mappings List */}
               {mappings.length === 0 ? (
                 <div
                   className={`rounded-xl border border-dashed p-7 text-center space-y-3 ${
@@ -747,26 +823,20 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                     <Mouse className="w-5 h-5 text-blue-500" />
                   </div>
                   <div className="space-y-1 max-w-xs mx-auto">
-                    <div className="text-sm font-bold">No Saved Mappings Yet</div>
+                    <div className="text-sm font-bold">No Mappings Configured</div>
                     <p className={`text-xs leading-relaxed ${mutedText}`}>
-                      Create mappings at any time, even without a mouse connected. They will apply automatically when a mouse is attached.
+                      Click <strong>+ Add Mapping</strong>, click the mouse button you want to remap, press <strong>Next</strong>, and press the replacement keyboard key (such as T).
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                  <div className="pt-1">
                     <button
                       type="button"
+                      data-ui-control="true"
                       onClick={handleOpenAdd}
-                      className="min-h-[42px] inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-all active:scale-95"
+                      className="min-h-[44px] inline-flex items-center gap-1.5 px-5 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-all active:scale-95 shadow-sm"
                     >
                       <Plus className="w-4 h-4" />
                       Add Mapping
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleQuickPresetForwardToT}
-                      className={`min-h-[42px] inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-xl border transition-all active:scale-95 ${elevatedBg}`}
-                    >
-                      Quick Add: Mouse Forward → Keyboard T
                     </button>
                   </div>
                 </div>
@@ -786,7 +856,6 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                       sourceDef &&
                       !sourceDef.stockInterceptableViaKeyEvent;
 
-                    // Determine per-rule operational status label
                     const ruleStateText = !rule.enabled
                       ? 'Rule paused'
                       : !masterEnabled
@@ -795,11 +864,13 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                       ? 'Saved (Permission needed)'
                       : isStockRestricted
                       ? 'Restricted on Stock Android (Needs uinput)'
-                      : connectedMice.length === 0
-                      ? 'Saved · Waiting for mouse'
-                      : 'Active';
+                      : 'Active · Redirecting Input Globally';
 
-                    const isRuleActivelyApplied = ruleStateText === 'Active';
+                    const isRuleActivelyApplied =
+                      rule.enabled &&
+                      masterEnabled &&
+                      backendMode !== 'RESTRICTED_UNAVAILABLE' &&
+                      !isStockRestricted;
 
                     return (
                       <div
@@ -809,10 +880,10 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                         }${elevatedBg}`}
                       >
                         <div className="flex items-center justify-between gap-3">
-                          {/* Left: Rule Toggle + Source -> Destination Relationship */}
                           <div className="flex items-center gap-3 min-w-0 flex-1">
                             <button
                               type="button"
+                              data-ui-control="true"
                               onClick={() => onToggleRuleEnabled(rule.id)}
                               title={rule.enabled ? 'Pause this mapping' : 'Enable this mapping'}
                               aria-label={`Toggle ${sourceDef?.shortLabel} mapping`}
@@ -832,7 +903,6 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                             </button>
 
                             <div className="min-w-0 flex-1 space-y-1">
-                              {/* Clear Source -> Destination Relationship */}
                               <div className="flex flex-wrap items-center gap-2 text-sm font-bold tracking-tight">
                                 <span className="inline-flex items-center gap-1.5">
                                   <Mouse className="w-3.5 h-3.5 text-blue-400 shrink-0" />
@@ -854,8 +924,9 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                                 </span>
                               </div>
 
-                              {/* Status & Optional Technical Code */}
-                              <div className={`text-xs flex flex-wrap items-center gap-1.5 ${mutedText}`}>
+                              <div
+                                className={`text-xs flex flex-wrap items-center gap-1.5 ${mutedText}`}
+                              >
                                 <span
                                   className={
                                     isRuleActivelyApplied
@@ -879,10 +950,10 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                             </div>
                           </div>
 
-                          {/* Right: Easy-to-reach Edit & Delete Actions (40x40+ touch targets) */}
                           <div className="flex items-center gap-1 shrink-0">
                             <button
                               type="button"
+                              data-ui-control="true"
                               onClick={() => handleOpenEdit(rule)}
                               aria-label={`Edit ${sourceDef?.shortLabel} mapping`}
                               className={`min-h-[40px] min-w-[40px] rounded-xl flex items-center justify-center transition-colors active:scale-95 ${
@@ -895,9 +966,10 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                             </button>
                             <button
                               type="button"
+                              data-ui-control="true"
                               onClick={() => {
                                 onDeleteMapping(rule.id);
-                                triggerToast(`Removed ${sourceDef?.shortLabel} mapping`);
+                                triggerToast(`Deleted ${sourceDef?.shortLabel} mapping`);
                               }}
                               aria-label={`Delete ${sourceDef?.shortLabel} mapping`}
                               className={`min-h-[40px] min-w-[40px] rounded-xl flex items-center justify-center transition-colors active:scale-95 ${
@@ -918,412 +990,490 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
             </div>
           </div>
         ) : (
-          /* ================= SCREEN 2: FAST ADD / EDIT MAPPING SCREEN ================= */
-          <div className="p-5 space-y-6">
-            {/* Live Selection Summary Header */}
-            <div
-              className={`p-3.5 rounded-xl border flex flex-wrap items-center justify-between gap-2 ${
-                isDark
-                  ? 'bg-blue-950/25 border-blue-500/30'
-                  : 'bg-blue-50/80 border-blue-200'
-              }`}
-            >
-              <span className={`text-xs font-medium ${subtleText}`}>Current Selection:</span>
-              <div className="flex items-center gap-2 text-sm font-bold">
-                <span className="inline-flex items-center gap-1.5">
-                  <Mouse className="w-3.5 h-3.5 text-blue-400" />
-                  {getMouseInputById(sourceMouseId)?.shortLabel}
-                </span>
-                <ArrowRight className="w-3.5 h-3.5 text-blue-500" />
-                <span className="inline-flex items-center gap-1.5 text-blue-400">
-                  {destinationType === 'KEYBOARD' ? (
-                    <Keyboard className="w-3.5 h-3.5" />
-                  ) : (
-                    <Mouse className="w-3.5 h-3.5" />
-                  )}
-                  {modifiers.length > 0 ? `${modifiers.join(' + ')} + ` : ''}
-                  {getDestinationDetails(destinationType, destinationId).shortLabel}
-                </span>
-              </div>
+          /* ================= SCREEN 2: 2-STEP GUIDED CAPTURE & SELECTION WIZARD ================= */
+          <div className="p-5 space-y-5">
+            {/* Step Progress Pill Strip */}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                data-ui-control="true"
+                onClick={() => {
+                  setFormError(null);
+                  setWizardStep(1);
+                }}
+                className={`p-2.5 rounded-xl border text-left transition-all ${
+                  wizardStep === 1
+                    ? 'bg-blue-600/15 border-blue-500 text-blue-400'
+                    : sourceMouseId
+                    ? isDark
+                      ? 'bg-emerald-950/25 border-emerald-800/60 text-emerald-300'
+                      : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : cardBg
+                }`}
+              >
+                <div className="text-[11px] font-bold uppercase tracking-wider">
+                  Step 1 · Mouse Input
+                </div>
+                <div className="text-xs font-bold truncate mt-0.5 text-current">
+                  {sourceMouseId
+                    ? getMouseInputById(sourceMouseId)?.shortLabel
+                    : 'Waiting for mouse click...'}
+                </div>
+              </button>
+
+              <button
+                type="button"
+                data-ui-control="true"
+                onClick={() => {
+                  if (sourceMouseId) {
+                    setFormError(null);
+                    setWizardStep(2);
+                  }
+                }}
+                disabled={!sourceMouseId}
+                className={`p-2.5 rounded-xl border text-left transition-all ${
+                  wizardStep === 2
+                    ? 'bg-blue-600/15 border-blue-500 text-blue-400'
+                    : destinationId
+                    ? isDark
+                      ? 'bg-emerald-950/25 border-emerald-800/60 text-emerald-300'
+                      : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : `${cardBg} opacity-60`
+                }`}
+              >
+                <div className="text-[11px] font-bold uppercase tracking-wider">
+                  Step 2 · Replacement Output
+                </div>
+                <div className="text-xs font-bold truncate mt-0.5 text-current">
+                  {destinationId
+                    ? `${modifiers.length > 0 ? `${modifiers.join('+')}+` : ''}${
+                        getDestinationDetails(destinationType, destinationId).shortLabel
+                      }`
+                    : 'Press Next after Step 1'}
+                </div>
+              </button>
             </div>
 
-            {/* SECTION 1: SOURCE MOUSE INPUT */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400">
-                    1. Source Mouse Input
-                  </h3>
-                  <p className={`text-xs ${mutedText}`}>
-                    Tap a mouse button below (no connected mouse required)
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() =>
-                    setCaptureTarget(captureTarget === 'SOURCE' ? 'NONE' : 'SOURCE')
-                  }
-                  className={`min-h-[36px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all ${
-                    captureTarget === 'SOURCE'
-                      ? 'bg-blue-600 text-white border-blue-500'
-                      : elevatedBg
+            {wizardStep === 1 ? (
+              /* ---------------- STEP 1: SELECT OR CLICK SOURCE MOUSE BUTTON ---------------- */
+              <div className="space-y-4">
+                {/* Live Physical Mouse Capture Box */}
+                <div
+                  onPointerDown={handleCaptureZonePointerDown}
+                  onContextMenu={(e) => e.preventDefault()}
+                  onAuxClick={(e) => e.preventDefault()}
+                  className={`p-6 rounded-2xl border-2 border-dashed text-center cursor-crosshair select-none transition-all space-y-2 ${
+                    sourceMouseId
+                      ? 'border-emerald-500 bg-emerald-500/10'
+                      : 'border-blue-500 bg-blue-600/10 hover:bg-blue-600/15'
                   }`}
                 >
-                  <Radio className="w-3.5 h-3.5" />
-                  {captureTarget === 'SOURCE' ? 'Listening...' : 'Detect Click'}
-                </button>
-              </div>
-
-              {captureTarget === 'SOURCE' && (
-                <div
-                  onMouseDown={handleCaptureBoxMouseDown}
-                  onContextMenu={(e) => e.preventDefault()}
-                  className="p-3.5 rounded-xl bg-blue-600/15 border border-blue-500 text-xs text-center font-medium cursor-pointer select-none"
-                >
-                  Click any button on your physical mouse inside this box to select it automatically.
+                  <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/40 flex items-center justify-center mx-auto">
+                    <Radio className="w-5 h-5 text-blue-400" />
+                  </div>
+                  <div className="text-sm font-bold">
+                    {sourceMouseId
+                      ? `Selected: ${getMouseInputById(sourceMouseId)?.label}`
+                      : 'Click Any Button on Your Physical Mouse Here'}
+                  </div>
+                  <p className={`text-xs max-w-sm mx-auto ${mutedText}`}>
+                    Click Left, Right, Middle, Back (Button 4), or Forward (Button 5) inside this box—or tap a button below—then click <strong>Next Step</strong> by hand.
+                  </p>
+                  {lastCapturedFlash && (
+                    <div className="text-xs font-mono font-bold text-emerald-400">
+                      {lastCapturedFlash}
+                    </div>
+                  )}
                 </div>
-              )}
 
-              {/* Grouped Mouse Buttons for Instant 1-Tap Selection */}
-              <div className="space-y-3">
-                {MOUSE_GROUPS.map((groupName) => {
-                  const groupButtons = MOUSE_INPUT_CATALOG.filter(
-                    (m) => m.group === groupName
-                  );
-                  return (
-                    <div key={groupName} className="space-y-1.5">
-                      <div className={`text-[11px] font-medium ${mutedText}`}>
-                        {groupName}
-                      </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                        {groupButtons.map((btn) => {
-                          const isSelected = sourceMouseId === btn.id;
-                          return (
-                            <button
-                              key={btn.id}
-                              type="button"
-                              onClick={() => {
-                                setSourceMouseId(btn.id);
-                                setFormError(null);
-                              }}
-                              className={`min-h-[48px] p-2.5 rounded-xl border text-left transition-all active:scale-[0.98] flex flex-col justify-between ${
-                                isSelected
-                                  ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
-                                  : `${elevatedBg} hover:border-blue-500/40`
-                              }`}
-                            >
-                              <div className="flex items-center justify-between gap-1 w-full">
-                                <span className="text-xs font-bold truncate">
-                                  {btn.shortLabel}
-                                </span>
-                                {isSelected && <Check className="w-3.5 h-3.5 shrink-0" />}
-                              </div>
-                              <span
-                                className={`text-[11px] truncate ${
-                                  isSelected ? 'text-blue-100' : mutedText
+                {/* Manual Mouse Button Selector Cards */}
+                <div className="space-y-2.5">
+                  <div className={`text-xs font-semibold ${subtleText}`}>
+                    Or Select Mouse Button Manually:
+                  </div>
+                  {MOUSE_GROUPS.map((groupName) => {
+                    const groupButtons = MOUSE_INPUT_CATALOG.filter(
+                      (m) => m.group === groupName
+                    );
+                    return (
+                      <div key={groupName} className="space-y-1.5">
+                        <div className={`text-[11px] font-medium ${mutedText}`}>
+                          {groupName}
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {groupButtons.map((btn) => {
+                            const isSelected = sourceMouseId === btn.id;
+                            return (
+                              <button
+                                key={btn.id}
+                                type="button"
+                                data-ui-control="true"
+                                onClick={() => {
+                                  setSourceMouseId(btn.id);
+                                  setFormError(null);
+                                }}
+                                className={`min-h-[48px] p-2.5 rounded-xl border text-left transition-all active:scale-[0.98] flex flex-col justify-between ${
+                                  isSelected
+                                    ? 'bg-blue-600 text-white border-blue-400 shadow-sm'
+                                    : `${elevatedBg} hover:border-blue-500/40`
                                 }`}
                               >
-                                {btn.compactTag}
-                              </span>
+                                <div className="flex items-center justify-between gap-1 w-full">
+                                  <span className="text-xs font-bold truncate">
+                                    {btn.shortLabel}
+                                  </span>
+                                  {isSelected && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                </div>
+                                <span
+                                  className={`text-[11px] truncate ${
+                                    isSelected ? 'text-blue-100' : mutedText
+                                  }`}
+                                >
+                                  {btn.compactTag}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {duplicateSourceRule && (
+                  <div
+                    className={`p-2.5 rounded-xl border text-xs flex items-center gap-2 ${
+                      isDark
+                        ? 'bg-amber-950/30 border-amber-800/50 text-amber-200'
+                        : 'bg-amber-50 border-amber-200 text-amber-800'
+                    }`}
+                  >
+                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+                    <span>
+                      {getMouseInputById(sourceMouseId!)?.shortLabel} already has a mapping. Saving will replace it.
+                    </span>
+                  </div>
+                )}
+
+                {formError && (
+                  <div className="p-3 rounded-xl bg-red-950/50 border border-red-800 text-xs text-red-200 font-medium flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                    <span>{formError}</span>
+                  </div>
+                )}
+
+                {/* Step 1 Footer Buttons (Clicked by hand) */}
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <button
+                    type="button"
+                    data-ui-control="true"
+                    onClick={() => setScreen('MAIN')}
+                    className={`min-h-[46px] py-2.5 px-4 text-xs font-bold rounded-xl border transition-all active:scale-[0.98] flex items-center justify-center gap-1.5 ${elevatedBg}`}
+                  >
+                    <X className="w-4 h-4" />
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    data-ui-control="true"
+                    onClick={handleProceedToStep2}
+                    className="min-h-[46px] py-2.5 px-4 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-all active:scale-[0.98] flex items-center justify-center gap-1.5 shadow-sm"
+                  >
+                    <span>Next Step</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* ---------------- STEP 2: PRESS OR SELECT REPLACEMENT OUTPUT ---------------- */
+              <div className="space-y-4">
+                {/* Output Type Switch: Keyboard Key vs Mouse Button */}
+                <div
+                  className={`grid grid-cols-2 gap-1.5 p-1 rounded-xl border ${
+                    isDark ? 'bg-[#0A0F18] border-slate-800' : 'bg-slate-100 border-slate-200'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    data-ui-control="true"
+                    onClick={() => handleChangeDestinationType('KEYBOARD')}
+                    className={`min-h-[40px] py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                      destinationType === 'KEYBOARD'
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : subtleText
+                    }`}
+                  >
+                    <Keyboard className="w-3.5 h-3.5" />
+                    Replace with Keyboard Key
+                  </button>
+                  <button
+                    type="button"
+                    data-ui-control="true"
+                    onClick={() => handleChangeDestinationType('MOUSE')}
+                    className={`min-h-[40px] py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                      destinationType === 'MOUSE'
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : subtleText
+                    }`}
+                  >
+                    <Mouse className="w-3.5 h-3.5" />
+                    Replace with Mouse Button
+                  </button>
+                </div>
+
+                {/* Live Capture Zone for Step 2 */}
+                {destinationType === 'KEYBOARD' ? (
+                  <div
+                    className={`p-5 rounded-2xl border-2 border-dashed text-center select-none transition-all space-y-1.5 ${
+                      destinationId
+                        ? 'border-emerald-500 bg-emerald-500/10'
+                        : 'border-blue-500 bg-blue-600/10'
+                    }`}
+                  >
+                    <div className="w-9 h-9 rounded-xl bg-blue-600/20 border border-blue-500/40 flex items-center justify-center mx-auto">
+                      <Keyboard className="w-4 h-4 text-blue-400" />
+                    </div>
+                    <div className="text-sm font-bold">
+                      {destinationId
+                        ? `Selected Output: ${
+                            getDestinationDetails('KEYBOARD', destinationId).label
+                          }`
+                        : 'Press Any Key on Your Physical Keyboard Now (e.g. T)'}
+                    </div>
+                    <p className={`text-xs max-w-sm mx-auto ${mutedText}`}>
+                      Pressing any key on your keyboard automatically selects it, or tap any key from the list below. Then click <strong>Save Mapping</strong> by hand.
+                    </p>
+                    {lastCapturedFlash && (
+                      <div className="text-xs font-mono font-bold text-emerald-400">
+                        {lastCapturedFlash}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div
+                    onPointerDown={handleCaptureZonePointerDown}
+                    onContextMenu={(e) => e.preventDefault()}
+                    onAuxClick={(e) => e.preventDefault()}
+                    className={`p-5 rounded-2xl border-2 border-dashed text-center cursor-crosshair select-none transition-all space-y-1.5 ${
+                      destinationId
+                        ? 'border-emerald-500 bg-emerald-500/10'
+                        : 'border-blue-500 bg-blue-600/10'
+                    }`}
+                  >
+                    <div className="w-9 h-9 rounded-xl bg-blue-600/20 border border-blue-500/40 flex items-center justify-center mx-auto">
+                      <Mouse className="w-4 h-4 text-blue-400" />
+                    </div>
+                    <div className="text-sm font-bold">
+                      {destinationId
+                        ? `Selected Output: ${
+                            getDestinationDetails('MOUSE', destinationId).label
+                          }`
+                        : 'Click Target Mouse Button Inside This Box'}
+                    </div>
+                    <p className={`text-xs max-w-sm mx-auto ${mutedText}`}>
+                      Click the replacement mouse button inside this box or select it below, then click <strong>Save Mapping</strong> by hand.
+                    </p>
+                  </div>
+                )}
+
+                {destinationType === 'KEYBOARD' ? (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap gap-1">
+                        {KEYBOARD_CATEGORIES.map((category) => {
+                          const active =
+                            keySearchQuery.trim() === '' && selectedKeyCategory === category;
+                          return (
+                            <button
+                              key={category}
+                              type="button"
+                              data-ui-control="true"
+                              onClick={() => {
+                                setKeySearchQuery('');
+                                setSelectedKeyCategory(category);
+                              }}
+                              className={`min-h-[34px] px-2.5 py-1 text-xs font-semibold rounded-lg transition-all whitespace-nowrap ${
+                                active
+                                  ? isDark
+                                    ? 'bg-slate-100 text-slate-900'
+                                    : 'bg-slate-900 text-white'
+                                  : `${cardBg} ${subtleText}`
+                              }`}
+                            >
+                              {category}
                             </button>
                           );
                         })}
                       </div>
+
+                      <div className="relative flex-1 min-w-[140px]">
+                        <Search
+                          className={`w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 ${mutedText}`}
+                        />
+                        <input
+                          type="text"
+                          data-ui-control="true"
+                          value={keySearchQuery}
+                          onChange={(e) => setKeySearchQuery(e.target.value)}
+                          placeholder="Filter keys..."
+                          aria-label="Filter keyboard keys"
+                          className={`w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border focus:outline-none focus:border-blue-500 ${elevatedBg}`}
+                        />
+                      </div>
                     </div>
-                  );
-                })}
-              </div>
 
-              {duplicateSourceRule && (
-                <div
-                  className={`p-2.5 rounded-lg border text-xs flex items-center gap-2 ${
-                    isDark
-                      ? 'bg-amber-950/30 border-amber-800/50 text-amber-200'
-                      : 'bg-amber-50 border-amber-200 text-amber-800'
-                  }`}
-                >
-                  <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
-                  <span>
-                    {getMouseInputById(sourceMouseId)?.shortLabel} already has a saved mapping. Saving will update it.
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* SECTION 2: REPLACEMENT DESTINATION INPUT */}
-            <div className="space-y-3 pt-2 border-t border-slate-800/40">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400">
-                    2. Replacement Output
-                  </h3>
-                  <p className={`text-xs ${mutedText}`}>
-                    Choose a keyboard key or mouse button to emit
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() =>
-                    setCaptureTarget(
-                      captureTarget === 'DESTINATION' ? 'NONE' : 'DESTINATION'
-                    )
-                  }
-                  className={`min-h-[36px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all ${
-                    captureTarget === 'DESTINATION'
-                      ? 'bg-blue-600 text-white border-blue-500'
-                      : elevatedBg
-                  }`}
-                >
-                  <Radio className="w-3.5 h-3.5" />
-                  {captureTarget === 'DESTINATION'
-                    ? destinationType === 'KEYBOARD'
-                      ? 'Press Any Key...'
-                      : 'Click Mouse...'
-                    : destinationType === 'KEYBOARD'
-                    ? 'Detect Key'
-                    : 'Detect Click'}
-                </button>
-              </div>
-
-              {captureTarget === 'DESTINATION' && (
-                <div
-                  onMouseDown={
-                    destinationType === 'MOUSE' ? handleCaptureBoxMouseDown : undefined
-                  }
-                  onContextMenu={(e) => e.preventDefault()}
-                  className="p-3.5 rounded-xl bg-blue-600/15 border border-blue-500 text-xs text-center font-medium cursor-pointer select-none"
-                >
-                  {destinationType === 'KEYBOARD'
-                    ? 'Press any key on your physical keyboard now to select it.'
-                    : 'Click any mouse button inside this box to select it as the replacement output.'}
-                </div>
-              )}
-
-              {/* Destination Type Switch: Keyboard Key vs Mouse Button */}
-              <div
-                className={`grid grid-cols-2 gap-1.5 p-1 rounded-xl border ${
-                  isDark ? 'bg-[#0A0F18] border-slate-800' : 'bg-slate-100 border-slate-200'
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => handleChangeDestinationType('KEYBOARD')}
-                  className={`min-h-[40px] py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
-                    destinationType === 'KEYBOARD'
-                      ? 'bg-blue-600 text-white shadow-xs'
-                      : `${subtleText}`
-                  }`}
-                >
-                  <Keyboard className="w-3.5 h-3.5" />
-                  Keyboard Key
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleChangeDestinationType('MOUSE')}
-                  className={`min-h-[40px] py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
-                    destinationType === 'MOUSE'
-                      ? 'bg-blue-600 text-white shadow-xs'
-                      : `${subtleText}`
-                  }`}
-                >
-                  <Mouse className="w-3.5 h-3.5" />
-                  Mouse Button
-                </button>
-              </div>
-
-              {destinationType === 'KEYBOARD' ? (
-                <div className="space-y-3">
-                  {/* Category Tabs + Search Filter */}
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap gap-1">
-                      {KEYBOARD_CATEGORIES.map((category) => {
-                        const active =
-                          keySearchQuery.trim() === '' && selectedKeyCategory === category;
+                    <div
+                      className={`grid gap-1.5 max-h-48 overflow-y-auto p-2 rounded-xl border ${
+                        selectedKeyCategory === 'Letters A–Z' ||
+                        selectedKeyCategory === 'Numbers 0–9' ||
+                        selectedKeyCategory === 'Function Keys'
+                          ? 'grid-cols-5 sm:grid-cols-6'
+                          : 'grid-cols-2 sm:grid-cols-3'
+                      } ${cardBg}`}
+                    >
+                      {displayedKeyboardKeys.map((keyDef) => {
+                        const isSelected = destinationId === keyDef.id;
                         return (
                           <button
-                            key={category}
+                            key={keyDef.id}
                             type="button"
+                            data-ui-control="true"
                             onClick={() => {
-                              setKeySearchQuery('');
-                              setSelectedKeyCategory(category);
+                              setDestinationId(keyDef.id);
+                              setFormError(null);
                             }}
-                            className={`min-h-[34px] px-2.5 py-1 text-xs font-semibold rounded-lg transition-all whitespace-nowrap ${
-                              active
-                                ? isDark
-                                  ? 'bg-slate-100 text-slate-900'
-                                  : 'bg-slate-900 text-white'
-                                : `${cardBg} ${subtleText}`
+                            className={`min-h-[42px] px-2 py-2 rounded-lg border text-center font-mono text-xs font-bold transition-all active:scale-95 flex flex-col items-center justify-center ${
+                              isSelected
+                                ? 'bg-blue-600 text-white border-blue-400 shadow-xs'
+                                : `${elevatedBg} hover:border-blue-500/50`
                             }`}
                           >
-                            {category}
+                            <span>{keyDef.keyCap}</span>
                           </button>
                         );
                       })}
                     </div>
-
-                    <div className="relative flex-1 min-w-[140px]">
-                      <Search
-                        className={`w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 ${mutedText}`}
-                      />
-                      <input
-                        type="text"
-                        value={keySearchQuery}
-                        onChange={(e) => setKeySearchQuery(e.target.value)}
-                        placeholder="Filter keys..."
-                        aria-label="Filter keyboard keys"
-                        className={`w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border focus:outline-none focus:border-blue-500 ${elevatedBg}`}
-                      />
-                    </div>
                   </div>
-
-                  {/* Interactive Keycap Grid (1-Tap Selection for T, G, Space, F1..F12, etc.) */}
-                  <div
-                    className={`grid gap-1.5 max-h-52 overflow-y-auto p-2 rounded-xl border ${
-                      selectedKeyCategory === 'Letters A–Z' ||
-                      selectedKeyCategory === 'Numbers 0–9' ||
-                      selectedKeyCategory === 'Function Keys'
-                        ? 'grid-cols-5 sm:grid-cols-6'
-                        : 'grid-cols-2 sm:grid-cols-3'
-                    } ${cardBg}`}
-                  >
-                    {displayedKeyboardKeys.map((keyDef) => {
-                      const isSelected = destinationId === keyDef.id;
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {MOUSE_INPUT_CATALOG.map((btn) => {
+                      const isSelected = destinationId === btn.id;
+                      const isSameAsSource =
+                        sourceMouseId === btn.id && modifiers.length === 0;
                       return (
                         <button
-                          key={keyDef.id}
+                          key={btn.id}
                           type="button"
+                          data-ui-control="true"
                           onClick={() => {
-                            setDestinationId(keyDef.id);
+                            setDestinationId(btn.id);
                             setFormError(null);
                           }}
-                          className={`min-h-[42px] px-2 py-2 rounded-lg border text-center font-mono text-xs font-bold transition-all active:scale-95 flex flex-col items-center justify-center ${
+                          className={`min-h-[48px] p-2.5 rounded-xl border text-left transition-all active:scale-[0.98] flex flex-col justify-between ${
                             isSelected
-                              ? 'bg-blue-600 text-white border-blue-400 shadow-xs'
-                              : `${elevatedBg} hover:border-blue-500/50`
+                              ? 'bg-blue-600 text-white border-blue-500'
+                              : `${elevatedBg} hover:border-blue-500/40`
+                          } ${isSameAsSource ? 'opacity-50' : ''}`}
+                        >
+                          <div className="flex items-center justify-between gap-1 w-full">
+                            <span className="text-xs font-bold truncate">
+                              {btn.shortLabel}
+                            </span>
+                            {isSelected && <Check className="w-3.5 h-3.5 shrink-0" />}
+                          </div>
+                          <span
+                            className={`text-[11px] truncate ${
+                              isSelected ? 'text-blue-100' : mutedText
+                            }`}
+                          >
+                            {isSameAsSource ? 'Same as source' : btn.compactTag}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Optional Modifier Combination Chips */}
+                <div className="pt-1 space-y-1.5">
+                  <span className={`block text-xs font-medium ${mutedText}`}>
+                    Optional Hold Modifiers (Combined with output)
+                  </span>
+                  <div className="grid grid-cols-4 gap-2">
+                    {ALL_MODIFIERS.map((mod) => {
+                      const active = modifiers.includes(mod);
+                      return (
+                        <button
+                          key={mod}
+                          type="button"
+                          data-ui-control="true"
+                          onClick={() => toggleModifier(mod)}
+                          className={`min-h-[38px] py-1.5 px-2 text-xs font-mono font-bold rounded-xl border transition-all active:scale-95 ${
+                            active
+                              ? 'bg-blue-600 text-white border-blue-500'
+                              : elevatedBg
                           }`}
                         >
-                          <span>{keyDef.keyCap}</span>
+                          {active ? `✓ ${mod}` : mod}
                         </button>
                       );
                     })}
                   </div>
                 </div>
-              ) : (
-                /* Mouse Button Destination Grid */
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {MOUSE_INPUT_CATALOG.map((btn) => {
-                    const isSelected = destinationId === btn.id;
-                    const isSameAsSource = sourceMouseId === btn.id && modifiers.length === 0;
-                    return (
-                      <button
-                        key={btn.id}
-                        type="button"
-                        onClick={() => {
-                          setDestinationId(btn.id);
-                          setFormError(null);
-                        }}
-                        className={`min-h-[48px] p-2.5 rounded-xl border text-left transition-all active:scale-[0.98] flex flex-col justify-between ${
-                          isSelected
-                            ? 'bg-blue-600 text-white border-blue-500'
-                            : `${elevatedBg} hover:border-blue-500/40`
-                        } ${isSameAsSource ? 'opacity-50' : ''}`}
-                      >
-                        <div className="flex items-center justify-between gap-1 w-full">
-                          <span className="text-xs font-bold truncate">
-                            {btn.shortLabel}
-                          </span>
-                          {isSelected && <Check className="w-3.5 h-3.5 shrink-0" />}
-                        </div>
-                        <span
-                          className={`text-[11px] truncate ${
-                            isSelected ? 'text-blue-100' : mutedText
-                          }`}
-                        >
-                          {isSameAsSource ? 'Same as source' : btn.compactTag}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
 
-              {/* Optional Modifier Combination Chips */}
-              <div className="pt-2 space-y-1.5">
-                <span className={`block text-xs font-medium ${mutedText}`}>
-                  Optional Hold Modifiers (Combined with output)
-                </span>
-                <div className="grid grid-cols-4 gap-2">
-                  {ALL_MODIFIERS.map((mod) => {
-                    const active = modifiers.includes(mod);
-                    return (
-                      <button
-                        key={mod}
-                        type="button"
-                        onClick={() => toggleModifier(mod)}
-                        className={`min-h-[40px] py-1.5 px-2 text-xs font-mono font-bold rounded-xl border transition-all active:scale-95 ${
-                          active
-                            ? 'bg-blue-600 text-white border-blue-500'
-                            : `${elevatedBg}`
-                        }`}
-                      >
-                        {active ? `✓ ${mod}` : mod}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
+                {formError && (
+                  <div className="p-3 rounded-xl bg-red-950/50 border border-red-800 text-xs text-red-200 font-medium flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                    <span>{formError}</span>
+                  </div>
+                )}
 
-            {formError && (
-              <div className="p-3 rounded-xl bg-red-950/50 border border-red-800 text-xs text-red-200 font-medium flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-                <span>{formError}</span>
+                {/* Step 2 Footer Buttons: Back & Save Mapping (Clicked by hand) */}
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <button
+                    type="button"
+                    data-ui-control="true"
+                    onClick={() => {
+                      setFormError(null);
+                      setWizardStep(1);
+                    }}
+                    className={`min-h-[46px] py-2.5 px-4 text-xs font-bold rounded-xl border transition-all active:scale-[0.98] flex items-center justify-center gap-1.5 ${elevatedBg}`}
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                    Back to Step 1
+                  </button>
+                  <button
+                    type="button"
+                    data-ui-control="true"
+                    onClick={handleSaveForm}
+                    className="min-h-[46px] py-2.5 px-4 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-all active:scale-[0.98] flex items-center justify-center gap-1.5 shadow-sm"
+                  >
+                    <Check className="w-4 h-4" />
+                    Save Mapping
+                  </button>
+                </div>
               </div>
             )}
-
-            {/* Easy-to-Reach Save & Cancel Actions */}
-            <div className="grid grid-cols-2 gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setCaptureTarget('NONE');
-                  setScreen('MAIN');
-                }}
-                className={`min-h-[46px] py-2.5 px-4 text-xs font-bold rounded-xl border transition-all active:scale-[0.98] flex items-center justify-center gap-1.5 ${elevatedBg}`}
-              >
-                <X className="w-4 h-4" />
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveForm}
-                className="min-h-[46px] py-2.5 px-4 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-all active:scale-[0.98] flex items-center justify-center gap-1.5 shadow-sm"
-              >
-                <Check className="w-4 h-4" />
-                Save Mapping
-              </button>
-            </div>
           </div>
         )}
       </div>
 
-      {/* Collapsible Hardware & Lifecycle Test Drawer (Kept cleanly separated below the Android App) */}
+      {/* Collapsible Hardware & Lifecycle Simulator */}
       <div className={`rounded-2xl border transition-colors ${shellBg}`}>
         <button
           type="button"
+          data-ui-control="true"
           onClick={() => setHardwareBarExpanded(!hardwareBarExpanded)}
           className="w-full px-4 py-3 flex items-center justify-between gap-2 text-left"
         >
           <div className="flex items-center gap-2">
             <SlidersHorizontal className="w-4 h-4 text-blue-500" />
             <span className="text-xs font-bold">
-              Hardware Hotplug & Lifecycle Simulator
+              Android Device Lifecycle & Hotplug Controls
             </span>
           </div>
           <span className={`text-xs font-mono ${mutedText}`}>
-            {hardwareBarExpanded ? 'Hide Controls' : 'Show Controls'}
+            {hardwareBarExpanded ? 'Hide' : 'Expand'}
           </span>
         </button>
 
@@ -1333,13 +1483,10 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               isDark ? 'border-slate-800/80' : 'border-slate-200'
             }`}
           >
-            <p className={`text-xs ${mutedText}`}>
-              Simulate attaching a physical USB OTG or Bluetooth mouse, closing the Android Activity UI, or rebooting the device to verify automatic persistence.
-            </p>
-
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
+                data-ui-control="true"
                 onClick={() => onConnectMouse('USB OTG')}
                 className={`min-h-[42px] px-3 py-2 text-xs font-semibold rounded-xl border flex items-center justify-center gap-1.5 transition-all active:scale-95 ${elevatedBg}`}
               >
@@ -1349,6 +1496,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
 
               <button
                 type="button"
+                data-ui-control="true"
                 onClick={() => onConnectMouse('Bluetooth HID')}
                 className={`min-h-[42px] px-3 py-2 text-xs font-semibold rounded-xl border flex items-center justify-center gap-1.5 transition-all active:scale-95 ${elevatedBg}`}
               >
@@ -1358,6 +1506,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
 
               <button
                 type="button"
+                data-ui-control="true"
                 onClick={() => onToggleAppUiClosed(!appUiClosed)}
                 className={`min-h-[42px] px-3 py-2 text-xs font-semibold rounded-xl border flex items-center justify-center gap-1.5 transition-all active:scale-95 ${elevatedBg}`}
               >
@@ -1376,6 +1525,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
 
               <button
                 type="button"
+                data-ui-control="true"
                 onClick={() => {
                   onSimulatePhoneReboot();
                   triggerToast('Phone restarted · Restored saved DataStore mappings');
@@ -1387,7 +1537,6 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
               </button>
             </div>
 
-            {/* Connected Mice List */}
             {connectedMice.length > 0 && (
               <div className="space-y-1.5 pt-1">
                 {connectedMice.map((mouse) => (
@@ -1402,6 +1551,7 @@ export const MinimalAndroidApp: React.FC<MinimalAndroidAppProps> = ({
                     </div>
                     <button
                       type="button"
+                      data-ui-control="true"
                       onClick={() => onDisconnectMouse(mouse.deviceId)}
                       className="text-xs font-semibold text-red-400 hover:text-red-300 shrink-0"
                     >

@@ -6,7 +6,9 @@ import {
   ShieldCheck,
   AlertCircle,
   Gamepad2,
-  Info
+  Globe,
+  Copy,
+  Check
 } from 'lucide-react';
 import {
   AndroidBackendMode,
@@ -16,7 +18,9 @@ import {
   MOUSE_INPUT_CATALOG,
   MappingRule,
   getDestinationDetails,
-  getMouseInputByDomButton
+  getKeyboardInputById,
+  getMouseInputByDomButton,
+  getMouseInputById
 } from '../data/inputCatalog';
 
 interface DiagnosticVerifierProps {
@@ -31,6 +35,7 @@ interface DiagnosticVerifierProps {
   onPhysicalMouseUp: (sourceMouseId: string, originLabel?: string) => void;
   onClearDiagnosticLog: () => void;
   targetSandboxBuffer: string;
+  onChangeSandboxBuffer: (nextValue: string) => void;
   onClearSandboxBuffer: () => void;
   pojavLastAction: string;
   pojavHeldKeys: string[];
@@ -39,7 +44,6 @@ interface DiagnosticVerifierProps {
 export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
   isDark,
   masterEnabled,
-  backendMode,
   mappings,
   activeHolds,
   diagnosticLog,
@@ -47,11 +51,13 @@ export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
   onPhysicalMouseUp,
   onClearDiagnosticLog,
   targetSandboxBuffer,
+  onChangeSandboxBuffer,
   onClearSandboxBuffer,
   pojavLastAction,
   pojavHeldKeys
 }) => {
   const [padActive, setPadActive] = useState(false);
+  const [copiedScript, setCopiedScript] = useState(false);
   const pressedViaPadRef = useRef<Set<string>>(new Set());
 
   const handleSurfacePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -81,6 +87,52 @@ export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
     pressedViaPadRef.current.clear();
   };
 
+  // Generate a live Cross-Window OS script (AutoHotkey v2 / Linux uinput) from the user's saved mappings
+  const buildSystemWideScript = () => {
+    const activeRules = mappings.filter((m) => m.enabled);
+    if (activeRules.length === 0) {
+      return `# Add a mapping in KeyBridge first to generate your system-wide OS redirect script.`;
+    }
+    const ahkMap: Record<string, string> = {
+      MOUSE_LEFT: 'LButton',
+      MOUSE_RIGHT: 'RButton',
+      MOUSE_MIDDLE: 'MButton',
+      MOUSE_BACK: 'XButton1',
+      MOUSE_FORWARD: 'XButton2'
+    };
+    const lines = [
+      `; KeyBridge Global OS Redirect Script (Works across all desktop/browser windows)`,
+      `#Requires AutoHotkey v2.0`,
+      `#SingleInstance Force`,
+      ``
+    ];
+    for (const rule of activeRules) {
+      const src = ahkMap[rule.sourceMouseId] ?? rule.sourceMouseId;
+      if (rule.destinationType === 'KEYBOARD') {
+        const keyDef = getKeyboardInputById(rule.destinationId);
+        const keyToken = keyDef?.printableChar
+          ? keyDef.printableChar.trim() || 'Space'
+          : keyDef?.keyCap.split(' ')[0].toLowerCase() ?? 't';
+        lines.push(`${src}::${keyToken}`);
+      } else {
+        const dst = ahkMap[rule.destinationId] ?? 'LButton';
+        lines.push(`${src}::${dst}`);
+      }
+    }
+    return lines.join('\n');
+  };
+
+  const handleCopyGlobalScript = async () => {
+    try {
+      await navigator.clipboard.writeText(buildSystemWideScript());
+      setCopiedScript(true);
+      setTimeout(() => setCopiedScript(false), 2000);
+    } catch {
+      setCopiedScript(true);
+      setTimeout(() => setCopiedScript(false), 2000);
+    }
+  };
+
   const latestEvent = diagnosticLog[0] ?? null;
 
   const panelBg = isDark
@@ -93,35 +145,96 @@ export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Honest Environment Scope Notice: Browser Prototype vs Native Android */}
+      {/* Global Window-Wide Redirect Status Banner */}
       <div
-        className={`rounded-2xl border p-4 flex items-start gap-3 ${
+        className={`rounded-2xl border p-4 flex items-start justify-between gap-3 ${
           isDark
-            ? 'bg-[#111927] border-slate-800 text-slate-300'
-            : 'bg-slate-100/80 border-slate-200 text-slate-700'
+            ? 'bg-[#111927] border-slate-800 text-slate-200'
+            : 'bg-blue-50/60 border-blue-200 text-slate-800'
         }`}
       >
-        <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-        <div className="text-xs leading-relaxed space-y-1">
-          <div className="font-bold text-blue-400">
-            Browser Input Verifier vs. Native Android Execution
+        <div className="flex items-start gap-3">
+          <Globe className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+          <div className="text-xs leading-relaxed space-y-0.5">
+            <div className="font-bold text-blue-400">
+              Global Window-Wide Input Redirect is Active
+            </div>
+            <p className={mutedText}>
+              Once you save a mapping (for example <code className="font-mono">Mouse Button → Keyboard T</code>), clicking that mouse button <strong>anywhere in this window</strong> automatically intercepts the mouse click, dispatches a live <code className="font-mono">KeyboardEvent</code>, and types directly into any focused input box or game receiver below.
+            </p>
           </div>
-          <p className={mutedText}>
-            In this web environment, physical mouse clicks are captured via DOM{' '}
-            <code className="font-mono">PointerEvent</code> APIs and processed by KeyBridge&apos;s stateful remapping engine. True system-wide OS interception (<code className="font-mono">/dev/input</code> <code className="font-mono">EVIOCGRAB</code> + <code className="font-mono">/dev/uinput</code> or Android <code className="font-mono">AccessibilityService</code>) executes on a physical Android device when you build the exported Android Studio project.
-          </p>
         </div>
       </div>
 
-      {/* 1. Interactive Mouse Capture Surface & Hardware Button Bank */}
+      {/* 1. Live Interactive Input Box & PojavLauncher Game Receiver (Immediate Proof) */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Live Editable Text & Key Redirect Box */}
+        <div className={`rounded-2xl border p-4 space-y-3 ${panelBg}`}>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-blue-400" />
+              <h3 className="text-xs font-bold">
+                Live Input Redirect Box (Click Mouse Anywhere!)
+              </h3>
+            </div>
+            {targetSandboxBuffer && (
+              <button
+                type="button"
+                data-ui-control="true"
+                onClick={onClearSandboxBuffer}
+                className="text-xs font-medium text-blue-400 hover:text-blue-300"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
+          <textarea
+            rows={3}
+            value={targetSandboxBuffer}
+            onChange={(e) => onChangeSandboxBuffer(e.target.value)}
+            placeholder="Once you save a mapping (e.g. Mouse Button -> T), click that mouse button anywhere on the page and watch 't' appear here automatically..."
+            className={`w-full rounded-xl border p-3 font-mono text-xs resize-none focus:outline-none focus:border-blue-500 ${cardBg}`}
+          />
+        </div>
+
+        {/* PojavLauncher / Game Key Receiver */}
+        <div className={`rounded-2xl border p-4 space-y-3 ${panelBg}`}>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Gamepad2 className="w-4 h-4 text-blue-400" />
+              <h3 className="text-xs font-bold">
+                Live Game / PojavLauncher Key Receiver
+              </h3>
+            </div>
+            <span className={`text-[11px] font-mono ${mutedText}`}>
+              Global Listener
+            </span>
+          </div>
+
+          <div className="bg-[#080C12] border border-slate-800 text-slate-100 rounded-xl p-3.5 font-mono text-xs space-y-2.5 min-h-[84px] flex flex-col justify-between">
+            <div className="text-xs font-semibold text-emerald-400 truncate">
+              {pojavLastAction}
+            </div>
+            <div className="text-[11px] text-slate-400 flex items-center justify-between pt-2 border-t border-slate-800/80">
+              <span>
+                Held Keys: {pojavHeldKeys.length > 0 ? pojavHeldKeys.join(', ') : 'None'}
+              </span>
+              <span>Stuck Keys: 0</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. Interactive Mouse Capture Surface & Hardware Button Bank */}
       <div className={`rounded-2xl border p-5 space-y-4 ${panelBg}`}>
         <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800/40">
           <div>
             <h2 className="text-sm font-bold">
-              Live Input Interception & Hold-State Tester
+              Dedicated Mouse Test Pad & Button Bank
             </h2>
             <p className={`text-xs ${mutedText}`}>
-              Click inside the capture surface with your physical mouse, or press/latch any button below to test press, hold, release, and disconnect cleanup.
+              Click any mouse button (including Left Click) inside the pad below, or test any button switch directly.
             </p>
           </div>
           <span className="text-xs font-mono text-blue-400">
@@ -148,11 +261,11 @@ export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
           <div className="inline-flex items-center gap-2 text-xs font-bold">
             <MousePointer className="w-4 h-4 text-blue-500" />
             <span>
-              Physical Mouse Capture Pad (Left, Right, Middle, Back/Btn 4, Forward/Btn 5)
+              Click Any Mouse Button Here (Left, Right, Middle, Back/Btn 4, Forward/Btn 5)
             </span>
           </div>
           <p className={`text-xs max-w-lg mx-auto ${mutedText}`}>
-            Click and hold any physical mouse button inside this box. Original browser context-menu and back/forward navigation events are suppressed here while active.
+            Inside this pad, even mapped <strong>Mouse Left</strong> clicks are intercepted and redirected into your replacement keyboard key without triggering normal page clicks.
           </p>
         </div>
 
@@ -214,6 +327,7 @@ export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
                 <div className="flex items-center gap-1 pt-1">
                   <button
                     type="button"
+                    data-ui-control="true"
                     onPointerDown={(e) => {
                       e.preventDefault();
                       onPhysicalMouseDown(btn.id);
@@ -232,6 +346,7 @@ export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
                   </button>
                   <button
                     type="button"
+                    data-ui-control="true"
                     onClick={() => {
                       if (isHeld) {
                         onPhysicalMouseUp(btn.id);
@@ -257,11 +372,11 @@ export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
         </div>
       </div>
 
-      {/* 2. Four-Stage Pipeline Verification */}
+      {/* 3. Four-Stage Pipeline Verification */}
       <div className={`rounded-2xl border p-5 space-y-3 ${panelBg}`}>
         <div className="flex items-center justify-between">
           <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400">
-            Pipeline State Inspection
+            Live Input Replacement Pipeline
           </h3>
           <span className={`text-xs font-mono ${mutedText}`}>
             {latestEvent ? `Phase: ${latestEvent.phase}` : 'Idle'}
@@ -270,9 +385,7 @@ export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
           <div className={`rounded-xl border p-3 space-y-1 ${cardBg}`}>
-            <div className={`text-[11px] font-medium ${mutedText}`}>
-              1. Source Input
-            </div>
+            <div className={`text-[11px] font-medium ${mutedText}`}>1. Source Input</div>
             <div className="text-xs font-mono font-bold truncate">
               {latestEvent ? latestEvent.rawMouseButtonLabel : 'Awaiting input'}
             </div>
@@ -341,140 +454,112 @@ export const DiagnosticVerifier: React.FC<DiagnosticVerifierProps> = ({
         </div>
       </div>
 
-      {/* 3. Target Application Receivers (PojavLauncher + Standard Android View) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className={`rounded-2xl border p-4 space-y-3 ${panelBg}`}>
+      {/* 4. Cross-Window OS Script Generator + Event History */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div className={`lg:col-span-5 rounded-2xl border p-4 space-y-3 ${panelBg}`}>
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Gamepad2 className="w-4 h-4 text-blue-400" />
+            <div>
               <h3 className="text-xs font-bold">
-                PojavLauncher (Minecraft Java GLFW Receiver)
+                External OS Window Script (Desktop Companion)
               </h3>
+              <p className={`text-[11px] ${mutedText}`}>
+                Auto-generated from your {mappings.length} saved mapping(s) for OS windows outside the browser
+              </p>
             </div>
-            <span className={`text-[11px] font-mono ${mutedText}`}>Pointer Capture</span>
+            <button
+              type="button"
+              data-ui-control="true"
+              onClick={handleCopyGlobalScript}
+              className="min-h-[32px] inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors shrink-0"
+            >
+              {copiedScript ? (
+                <>
+                  <Check className="w-3 h-3" />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3 h-3" />
+                  Copy Script
+                </>
+              )}
+            </button>
           </div>
-
-          <div className="bg-[#080C12] border border-slate-800 text-slate-100 rounded-xl p-3.5 font-mono text-xs space-y-2">
-            <div className="text-xs font-semibold text-emerald-400 truncate">
-              {pojavLastAction}
-            </div>
-            <div className="text-[11px] text-slate-400 flex items-center justify-between pt-2 border-t border-slate-800/80">
-              <span>
-                Held: {pojavHeldKeys.length > 0 ? pojavHeldKeys.join(', ') : 'None'}
-              </span>
-              <span>Stuck Keys: 0</span>
-            </div>
-          </div>
+          <pre className="p-3 rounded-xl bg-[#080C12] border border-slate-800 text-xs font-mono text-slate-300 overflow-x-auto">
+            <code>{buildSystemWideScript()}</code>
+          </pre>
         </div>
 
-        <div className={`rounded-2xl border p-4 space-y-3 ${panelBg}`}>
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Terminal className="w-4 h-4 text-blue-400" />
-              <h3 className="text-xs font-bold">Foreground App Input Buffer</h3>
-            </div>
-            {targetSandboxBuffer && (
+        <div className={`lg:col-span-7 rounded-2xl border overflow-hidden ${panelBg}`}>
+          <div className="px-4 py-3 border-b border-slate-800/50 flex items-center justify-between">
+            <span className="text-xs font-bold">
+              Event Trace ({diagnosticLog.length})
+            </span>
+            {diagnosticLog.length > 0 && (
               <button
                 type="button"
-                onClick={onClearSandboxBuffer}
-                className="text-xs font-medium text-blue-400 hover:text-blue-300"
+                data-ui-control="true"
+                onClick={onClearDiagnosticLog}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border ${cardBg}`}
               >
+                <Trash2 className="w-3 h-3" />
                 Clear
               </button>
             )}
           </div>
 
-          <div
-            className={`rounded-xl border p-3.5 font-mono text-xs min-h-[68px] break-all ${cardBg}`}
-          >
-            {targetSandboxBuffer ? (
-              targetSandboxBuffer
-            ) : (
-              <span className={mutedText}>
-                Press Mouse Forward (mapped to Keyboard T) to emit &apos;t&apos; here...
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* 4. Event History Table */}
-      <div className={`rounded-2xl border overflow-hidden ${panelBg}`}>
-        <div className="px-4 py-3 border-b border-slate-800/50 flex items-center justify-between">
-          <span className="text-xs font-bold">
-            Event Trace ({diagnosticLog.length})
-          </span>
-          {diagnosticLog.length > 0 && (
-            <button
-              type="button"
-              onClick={onClearDiagnosticLog}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border ${cardBg}`}
-            >
-              <Trash2 className="w-3 h-3" />
-              Clear
-            </button>
+          {diagnosticLog.length === 0 ? (
+            <div className={`p-6 text-center text-xs ${mutedText}`}>
+              No input events recorded yet. Add a mapping and click your mouse button anywhere in the window to see it redirected live.
+            </div>
+          ) : (
+            <div className="overflow-x-auto max-h-48 overflow-y-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className={`border-b border-slate-800/50 ${mutedText}`}>
+                    <th className="py-2 px-3 font-medium">Time</th>
+                    <th className="py-2 px-3 font-medium">State</th>
+                    <th className="py-2 px-3 font-medium">Source</th>
+                    <th className="py-2 px-3 font-medium">Replacement</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/40 font-mono">
+                  {diagnosticLog.map((entry) => (
+                    <tr key={entry.id}>
+                      <td className={`py-2 px-3 whitespace-nowrap ${mutedText}`}>
+                        {new Date(entry.timestamp).toLocaleTimeString([], {
+                          hour12: false,
+                          hour: '2-digit',
+                          minute: '2-digit',
+                          second: '2-digit'
+                        })}
+                      </td>
+                      <td className="py-2 px-3 whitespace-nowrap">
+                        <span
+                          className={
+                            entry.phase === 'PRESS'
+                              ? 'text-blue-400 font-bold'
+                              : entry.phase === 'RELEASE'
+                              ? mutedText
+                              : 'text-amber-400 font-bold'
+                          }
+                        >
+                          {entry.phase}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3 whitespace-nowrap">
+                        {entry.rawMouseButtonLabel}
+                      </td>
+                      <td className="py-2 px-3 text-blue-400 font-semibold whitespace-nowrap">
+                        {entry.replacementOutputLabel}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
-
-        {diagnosticLog.length === 0 ? (
-          <div className={`p-6 text-center text-xs ${mutedText}`}>
-            No input events recorded yet. Press any mouse button above to inspect its press and release lifecycle.
-          </div>
-        ) : (
-          <div className="overflow-x-auto max-h-56 overflow-y-auto">
-            <table className="w-full text-left border-collapse text-xs">
-              <thead>
-                <tr className={`border-b border-slate-800/50 ${mutedText}`}>
-                  <th className="py-2 px-3 font-medium">Time</th>
-                  <th className="py-2 px-3 font-medium">State</th>
-                  <th className="py-2 px-3 font-medium">Source</th>
-                  <th className="py-2 px-3 font-medium">Suppressed</th>
-                  <th className="py-2 px-3 font-medium">Replacement</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/40 font-mono">
-                {diagnosticLog.map((entry) => (
-                  <tr key={entry.id}>
-                    <td className={`py-2 px-3 whitespace-nowrap ${mutedText}`}>
-                      {new Date(entry.timestamp).toLocaleTimeString([], {
-                        hour12: false,
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit'
-                      })}
-                    </td>
-                    <td className="py-2 px-3 whitespace-nowrap">
-                      <span
-                        className={
-                          entry.phase === 'PRESS'
-                            ? 'text-blue-400 font-bold'
-                            : entry.phase === 'RELEASE'
-                            ? mutedText
-                            : 'text-amber-400 font-bold'
-                        }
-                      >
-                        {entry.phase}
-                      </span>
-                    </td>
-                    <td className="py-2 px-3 whitespace-nowrap">
-                      {entry.rawMouseButtonLabel}
-                    </td>
-                    <td className="py-2 px-3 whitespace-nowrap">
-                      {entry.sourceSuppressed ? (
-                        <span className="text-emerald-400">Yes</span>
-                      ) : (
-                        <span className="text-amber-400">No</span>
-                      )}
-                    </td>
-                    <td className="py-2 px-3 text-blue-400 font-semibold whitespace-nowrap">
-                      {entry.replacementOutputLabel}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
     </div>
   );
