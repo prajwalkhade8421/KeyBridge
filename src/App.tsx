@@ -15,6 +15,8 @@ import { MinimalAndroidApp } from './components/MinimalAndroidApp';
 import { DiagnosticVerifier } from './components/DiagnosticVerifier';
 import { FeasibilityReportView } from './components/FeasibilityReportView';
 import { AndroidProjectExporter } from './components/AndroidProjectExporter';
+import { downloadAndroidStudioZip } from './utils/exportAndroidZip';
+import { usePWAInstall } from './hooks/usePWAInstall';
 import {
   Sun,
   Moon,
@@ -24,7 +26,9 @@ import {
   Code2,
   Columns2,
   Trash2,
-  Zap
+  Zap,
+  Download,
+  Package
 } from 'lucide-react';
 
 // Clean v2 storage key so no pre-given examples are ever loaded
@@ -68,6 +72,7 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('WORKBENCH');
   const [isWizardConfiguring, setIsWizardConfiguring] = useState<boolean>(false);
+  const { isInstallable, isInstalled, promptInstall } = usePWAInstall();
 
   // 2. Persistent DataStore State (Starts completely empty — no pre-given examples)
   const [masterEnabled, setMasterEnabled] = useState<boolean>(() => {
@@ -722,7 +727,7 @@ export default function App() {
                   : mutedText
               }`}
             >
-              Android Studio Code
+              Export APK & Code
             </a>
           </nav>
 
@@ -731,10 +736,13 @@ export default function App() {
             <button
               type="button"
               data-ui-control="true"
-              onClick={handleExportAndroidBundle}
+              onClick={() => {
+                setActiveTab('SOURCE');
+                void downloadAndroidStudioZip(mappings);
+              }}
               className="min-h-[38px] px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-all active:scale-95 whitespace-nowrap shrink-0"
             >
-              Export Android Project
+              Export APK Project (.zip)
             </button>
           </div>
         </div>
@@ -820,12 +828,24 @@ export default function App() {
                   : mutedText
               }`}
             >
-              <Code2 className="w-3.5 h-3.5" />
-              <span>Android Studio Code</span>
+              <Package className="w-3.5 h-3.5" />
+              <span>Export APK & Code</span>
             </button>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {isInstallable && !isInstalled && (
+              <button
+                type="button"
+                data-ui-control="true"
+                onClick={promptInstall}
+                className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-all active:scale-95"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Install WebAPK App</span>
+              </button>
+            )}
+
             <button
               type="button"
               data-ui-control="true"
@@ -975,7 +995,8 @@ export default function App() {
           <AndroidProjectExporter
             isDark={isDark}
             currentMappings={mappings}
-            onExportBundle={handleExportAndroidBundle}
+            onExportZip={() => downloadAndroidStudioZip(mappings)}
+            onExportJsonBundle={handleExportAndroidBundle}
           />
         )}
       </main>

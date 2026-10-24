@@ -190,6 +190,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
@@ -199,10 +200,9 @@ dependencies {
     path: 'app/src/main/AndroidManifest.xml',
     filename: 'AndroidManifest.xml',
     language: 'xml',
-    summary: 'Declares ForegroundService, AccessibilityService, BootCompletedReceiver, and USB/Bluetooth input capabilities.',
+    summary: 'Declares ForegroundService, AccessibilityService, KeyBridgeImeService, and BootCompletedReceiver (AGP 8+ compliant).',
     content: `<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="dev.keybridge.remapper">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Persistent foreground operation & automatic boot startup -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -295,6 +295,20 @@ dependencies {
     android:accessibilityFlags="flagRequestFilterKeyEvents"
     android:canRequestFilterKeyEvents="true"
     android:notificationTimeout="0" />`
+  },
+  {
+    path: 'app/src/main/res/xml/method.xml',
+    filename: 'method.xml',
+    language: 'xml',
+    summary: 'InputMethodService XML declaration required by AndroidManifest.xml (@xml/method).',
+    content: `<?xml version="1.0" encoding="utf-8"?>
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsSwitchingToNextInputMethod="true">
+    <subtype
+        android:label="KeyBridge Hardware Input"
+        android:imeSubtypeLocale="en_US"
+        android:imeSubtypeMode="keyboard" />
+</input-method>`
   },
   {
     path: 'app/src/main/java/dev/keybridge/remapper/data/MappingRepository.kt',
@@ -444,7 +458,9 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.hardware.input.InputManager
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -485,9 +501,18 @@ class RemapperForegroundService : Service(), InputManager.InputDeviceListener {
         repository = MappingRepository(applicationContext)
         inputManager = getSystemService(Context.INPUT_SERVICE) as InputManager
 
-        startForeground(NOTIFICATION_ID, buildStatusNotification("Monitoring mouse connections"))
-        inputManager.registerInputDeviceListener(this, Handler(Looper.getMainLooper()))
+        val notification = buildStatusNotification("Monitoring mouse connections")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
 
+        inputManager.registerInputDeviceListener(this, Handler(Looper.getMainLooper()))
         scanExistingMouseDevices()
 
         serviceScope.launch {
@@ -512,10 +537,6 @@ class RemapperForegroundService : Service(), InputManager.InputDeviceListener {
         }
     }
 
-    /**
-     * Universal mouse detection: matches any USB OTG or Bluetooth HID mouse
-     * while ignoring our own virtual uinput device to prevent recursive remapping.
-     */
     private fun isCompatibleMouse(device: InputDevice): Boolean {
         if (device.name.contains(EvdevUinputDaemon.VIRTUAL_DEVICE_NAME)) return false
         val sources = device.sources
@@ -546,7 +567,6 @@ class RemapperForegroundService : Service(), InputManager.InputDeviceListener {
     override fun onInputDeviceRemoved(deviceId: Int) {
         val removed = connectedMice.remove(deviceId)
         if (removed != null) {
-            // CRITICAL SAFETY: Release any held target keys associated with this disconnected mouse
             val heldTargetCodes = heldButtonsByDevice.remove(deviceId).orEmpty()
             for (linuxTargetCode in heldTargetCodes) {
                 uinputDaemon.forceReleaseTargetCode(linuxTargetCode)
@@ -694,12 +714,70 @@ class EvdevUinputDaemon {
         "MOUSE_MIDDLE" -> 0x112
         "MOUSE_BACK" -> 0x113
         "MOUSE_FORWARD" -> 0x114
-        "KEY_T" -> 20
+        "MOUSE_BUTTON_6" -> 0x115
+        "MOUSE_BUTTON_7" -> 0x116
+        "MOUSE_BUTTON_8" -> 0x117
+        "KEY_A" -> 30
+        "KEY_B" -> 48
+        "KEY_C" -> 46
+        "KEY_D" -> 32
+        "KEY_E" -> 18
+        "KEY_F" -> 33
         "KEY_G" -> 34
+        "KEY_H" -> 35
+        "KEY_I" -> 23
+        "KEY_J" -> 36
+        "KEY_K" -> 37
+        "KEY_L" -> 38
+        "KEY_M" -> 50
+        "KEY_N" -> 49
+        "KEY_O" -> 24
+        "KEY_P" -> 25
+        "KEY_Q" -> 16
+        "KEY_R" -> 19
+        "KEY_S" -> 31
+        "KEY_T" -> 20
+        "KEY_U" -> 22
+        "KEY_V" -> 47
+        "KEY_W" -> 17
+        "KEY_X" -> 45
+        "KEY_Y" -> 21
+        "KEY_Z" -> 44
+        "KEY_1" -> 2
+        "KEY_2" -> 3
+        "KEY_3" -> 4
+        "KEY_4" -> 5
+        "KEY_5" -> 6
+        "KEY_6" -> 7
+        "KEY_7" -> 8
+        "KEY_8" -> 9
+        "KEY_9" -> 10
+        "KEY_0" -> 11
+        "KEY_F1" -> 59
+        "KEY_F2" -> 60
+        "KEY_F3" -> 61
+        "KEY_F4" -> 62
+        "KEY_F5" -> 63
+        "KEY_F6" -> 64
+        "KEY_F7" -> 65
+        "KEY_F8" -> 66
+        "KEY_F9" -> 67
+        "KEY_F10" -> 68
+        "KEY_F11" -> 87
+        "KEY_F12" -> 88
         "KEY_SPACE" -> 57
         "KEY_ENTER" -> 28
         "KEY_ESCAPE" -> 1
         "KEY_TAB" -> 15
+        "KEY_BACKSPACE" -> 14
+        "KEY_UP" -> 103
+        "KEY_DOWN" -> 108
+        "KEY_LEFT" -> 105
+        "KEY_RIGHT" -> 106
+        "KEY_CTRL_LEFT" -> 29
+        "KEY_SHIFT_LEFT" -> 42
+        "KEY_ALT_LEFT" -> 56
+        "KEY_META_LEFT" -> 125
         else -> 20
     }
 
@@ -749,10 +827,9 @@ target_link_libraries(
     path: 'app/src/main/cpp/uinput_bridge.cpp',
     filename: 'uinput_bridge.cpp',
     language: 'cpp',
-    summary: 'Linux kernel evdev EVIOCGRAB interceptor and /dev/uinput composite virtual keyboard/mouse emitter.',
+    summary: 'Linux kernel evdev EVIOCGRAB interceptor, /dev/uinput composite emitter, and complete JNI exports.',
     content: `// uinput_bridge.cpp
 // Native Linux evdev + uinput daemon for genuine hardware mouse-to-keyboard/mouse replacement.
-// Preserves press (1), release (0), and hold/repeat (2) states while suppressing original mouse buttons.
 
 #include <fcntl.h>
 #include <jni.h>
@@ -761,14 +838,15 @@ target_link_libraries(
 #include <poll.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
 #include <mutex>
 
 struct RemapTarget {
-    uint16_t targetEvKey;          // e.g. KEY_T (20) or BTN_RIGHT (0x111)
-    std::vector<uint16_t> mods;    // Optional modifier keycodes (KEY_LEFTCTRL, KEY_LEFTSHIFT, etc.)
+    uint16_t targetEvKey;
+    std::vector<uint16_t> mods;
 };
 
 static int g_uinputFd = -1;
@@ -791,25 +869,21 @@ static void emitSynReport(int ufd) {
 }
 
 int setupVirtualCompositeDevice() {
+    if (g_uinputFd >= 0) return g_uinputFd;
     int ufd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (ufd < 0) return -1;
 
-    // Enable EV_KEY (keyboard + mouse buttons), EV_REL (cursor movement + wheel), and EV_SYN
     ioctl(ufd, UI_SET_EVBIT, EV_KEY);
     ioctl(ufd, UI_SET_EVBIT, EV_REL);
     ioctl(ufd, UI_SET_EVBIT, EV_SYN);
 
-    // Register standard and extra mouse buttons (BTN_LEFT 0x110 .. BTN_TASK 0x117)
     for (int btn = BTN_LEFT; btn <= BTN_TASK; ++btn) {
         ioctl(ufd, UI_SET_KEYBIT, btn);
     }
-
-    // Register keyboard keys (1 .. 248)
     for (int key = 1; key <= 248; ++key) {
         ioctl(ufd, UI_SET_KEYBIT, key);
     }
 
-    // Register relative mouse axes so pass-through mouse movement works natively
     ioctl(ufd, UI_SET_RELBIT, REL_X);
     ioctl(ufd, UI_SET_RELBIT, REL_Y);
     ioctl(ufd, UI_SET_RELBIT, REL_WHEEL);
@@ -829,54 +903,74 @@ int setupVirtualCompositeDevice() {
     return ufd;
 }
 
-void processMouseEvdevNode(const char* devNodePath) {
-    int fd = open(devNodePath, O_RDONLY);
-    if (fd < 0) return;
+extern "C" {
 
-    // Exclusively grab the physical mouse so original button presses are suppressed
-    if (ioctl(fd, EVIOCGRAB, 1) < 0) {
-        close(fd);
-        return;
-    }
+JNIEXPORT jint JNICALL
+Java_dev_keybridge_remapper_nativebridge_EvdevUinputDaemon_nativeSetupVirtualCompositeDevice(
+    JNIEnv* /*env*/, jobject /*thiz*/
+) {
+    return setupVirtualCompositeDevice();
+}
 
-    struct input_event ev {};
-    while (read(fd, &ev, sizeof(ev)) == sizeof(ev)) {
-        if (ev.type == EV_KEY && ev.code >= BTN_MOUSE && ev.code <= BTN_TASK) {
-            std::lock_guard<std::mutex> lock(g_ruleMutex);
-            auto it = g_remapTable.find(ev.code);
-            if (it != g_remapTable.end()) {
-                const RemapTarget& target = it->second;
-                if (ev.value == 1) {
-                    // Button Press: press modifiers first, then target key/button
-                    for (uint16_t mod : target.mods) {
-                        emitInputEvent(g_uinputFd, EV_KEY, mod, 1);
-                    }
-                    emitInputEvent(g_uinputFd, EV_KEY, target.targetEvKey, 1);
-                    emitSynReport(g_uinputFd);
-                    g_activeHolds[ev.code] = target;
-                } else if (ev.value == 0) {
-                    // Button Release: release target key/button, then modifiers in reverse order
-                    emitInputEvent(g_uinputFd, EV_KEY, target.targetEvKey, 0);
-                    for (auto mit = target.mods.rbegin(); mit != target.mods.rend(); ++mit) {
-                        emitInputEvent(g_uinputFd, EV_KEY, *mit, 0);
-                    }
-                    emitSynReport(g_uinputFd);
-                    g_activeHolds.erase(ev.code);
-                } else if (ev.value == 2) {
-                    // Held auto-repeat state
-                    emitInputEvent(g_uinputFd, EV_KEY, target.targetEvKey, 2);
-                    emitSynReport(g_uinputFd);
-                }
-                continue; // Original mouse button event is suppressed!
+JNIEXPORT jboolean JNICALL
+Java_dev_keybridge_remapper_nativebridge_EvdevUinputDaemon_nativeAttachDeviceById(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint /*deviceId*/
+) {
+    return g_uinputFd >= 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_dev_keybridge_remapper_nativebridge_EvdevUinputDaemon_nativeDetachDeviceById(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint /*deviceId*/
+) {
+    // Device detached cleanup handled via nativeReleaseAllHeld
+}
+
+JNIEXPORT void JNICALL
+Java_dev_keybridge_remapper_nativebridge_EvdevUinputDaemon_nativeClearRules(
+    JNIEnv* /*env*/, jobject /*thiz*/
+) {
+    std::lock_guard<std::mutex> lock(g_ruleMutex);
+    g_remapTable.clear();
+}
+
+JNIEXPORT void JNICALL
+Java_dev_keybridge_remapper_nativebridge_EvdevUinputDaemon_nativeAddRemapRule(
+    JNIEnv* env, jobject /*thiz*/, jint srcEvCode, jint dstEvCode, jintArray modifiers
+) {
+    std::lock_guard<std::mutex> lock(g_ruleMutex);
+    RemapTarget target;
+    target.targetEvKey = static_cast<uint16_t>(dstEvCode);
+    if (modifiers != nullptr) {
+        jsize len = env->GetArrayLength(modifiers);
+        jint* elems = env->GetIntArrayElements(modifiers, nullptr);
+        for (jsize i = 0; i < len; ++i) {
+            if (elems[i] > 0) {
+                target.mods.push_back(static_cast<uint16_t>(elems[i]));
             }
         }
-        // Unmapped mouse movement (REL_X, REL_Y, REL_WHEEL) or unmapped button: pass through directly
-        emitInputEvent(g_uinputFd, ev.type, ev.code, ev.value);
+        env->ReleaseIntArrayElements(modifiers, elems, JNI_ABORT);
     }
+    g_remapTable[static_cast<uint16_t>(srcEvCode)] = target;
+}
 
-    // Device disconnected: release any keys that were still held by this physical mouse
-    {
-        std::lock_guard<std::mutex> lock(g_ruleMutex);
+JNIEXPORT void JNICALL
+Java_dev_keybridge_remapper_nativebridge_EvdevUinputDaemon_nativeForceReleaseKey(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint linuxCode
+) {
+    std::lock_guard<std::mutex> lock(g_ruleMutex);
+    if (g_uinputFd >= 0 && linuxCode > 0) {
+        emitInputEvent(g_uinputFd, EV_KEY, static_cast<uint16_t>(linuxCode), 0);
+        emitSynReport(g_uinputFd);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_dev_keybridge_remapper_nativebridge_EvdevUinputDaemon_nativeReleaseAllHeld(
+    JNIEnv* /*env*/, jobject /*thiz*/
+) {
+    std::lock_guard<std::mutex> lock(g_ruleMutex);
+    if (g_uinputFd >= 0) {
         for (const auto& kv : g_activeHolds) {
             emitInputEvent(g_uinputFd, EV_KEY, kv.second.targetEvKey, 0);
             for (uint16_t mod : kv.second.mods) {
@@ -884,11 +978,22 @@ void processMouseEvdevNode(const char* devNodePath) {
             }
         }
         emitSynReport(g_uinputFd);
-        g_activeHolds.clear();
     }
+    g_activeHolds.clear();
+}
 
-    ioctl(fd, EVIOCGRAB, 0);
-    close(fd);
+JNIEXPORT void JNICALL
+Java_dev_keybridge_remapper_nativebridge_EvdevUinputDaemon_nativeShutdownUinput(
+    JNIEnv* /*env*/, jobject /*thiz*/
+) {
+    std::lock_guard<std::mutex> lock(g_ruleMutex);
+    if (g_uinputFd >= 0) {
+        ioctl(g_uinputFd, UI_DEV_DESTROY);
+        close(g_uinputFd);
+        g_uinputFd = -1;
+    }
+}
+
 }`
   },
   {
@@ -911,16 +1016,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
-/**
- * Stock No-Root Fallback Service:
- * Intercepts KeyEvents synthesized by Android InputReader for Mouse Back (KEYCODE_BACK = 4)
- * and Mouse Forward (KEYCODE_FORWARD = 125).
- *
- * Honest stock Android boundary:
- * - Raw MotionEvent clicks (Left, Right, Middle) do NOT pass through AccessibilityService.onKeyEvent().
- * - Full replacement of all buttons in Pointer-Capture games (e.g. PojavLauncher) requires the
- *   EvdevUinputDaemon (Root or Shizuku).
- */
 class RemapperAccessibilityService : AccessibilityService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -962,14 +1057,12 @@ class RemapperAccessibilityService : AccessibilityService() {
 
         val rule = activeRulesBySource[sourceMouseId] ?: return false
 
-        // Forward the press/release state to our companion InputMethodService if active
         KeyBridgeImeService.dispatchRemappedKeyFromAccessibility(
             rule = rule,
             action = event.action,
             eventTime = event.eventTime
         )
 
-        // Returning true suppresses the original Back/Forward navigation event on stock Android
         return true
     }
 
@@ -979,6 +1072,121 @@ class RemapperAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         scope.cancel()
         super.onDestroy()
+    }
+}`
+  },
+  {
+    path: 'app/src/main/java/dev/keybridge/remapper/service/KeyBridgeImeService.kt',
+    filename: 'KeyBridgeImeService.kt',
+    language: 'kotlin',
+    summary: 'Companion InputMethodService that injects synthesized KeyEvents on stock unrooted Android.',
+    content: `package dev.keybridge.remapper.service
+
+import android.inputmethodservice.InputMethodService
+import android.os.SystemClock
+import android.view.KeyCharacterMap
+import android.view.KeyEvent
+import dev.keybridge.remapper.data.MappingRule
+
+class KeyBridgeImeService : InputMethodService() {
+
+    override fun onCreate() {
+        super.onCreate()
+        activeInstance = this
+    }
+
+    override fun onDestroy() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
+        super.onDestroy()
+    }
+
+    private fun sendSynthesizedKey(rule: MappingRule, action: Int, eventTime: Long) {
+        val ic = currentInputConnection ?: return
+        val androidKeyCode = resolveAndroidKeyCode(rule.destinationId)
+        val metaState = resolveMetaState(rule.modifiers)
+        val downTime = if (action == KeyEvent.ACTION_DOWN) eventTime else SystemClock.uptimeMillis()
+
+        val keyEvent = KeyEvent(
+            downTime,
+            eventTime,
+            action,
+            androidKeyCode,
+            0,
+            metaState,
+            KeyCharacterMap.VIRTUAL_KEYBOARD,
+            0,
+            KeyEvent.FLAG_FROM_SYSTEM
+        )
+        ic.sendKeyEvent(keyEvent)
+    }
+
+    private fun resolveMetaState(modifiers: List<String>): Int {
+        var meta = 0
+        if ("CTRL" in modifiers) meta = meta or KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+        if ("SHIFT" in modifiers) meta = meta or KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+        if ("ALT" in modifiers) meta = meta or KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON
+        if ("META" in modifiers) meta = meta or KeyEvent.META_META_ON or KeyEvent.META_META_LEFT_ON
+        return meta
+    }
+
+    private fun resolveAndroidKeyCode(destinationId: String): Int = when (destinationId) {
+        "KEY_A" -> KeyEvent.KEYCODE_A
+        "KEY_B" -> KeyEvent.KEYCODE_B
+        "KEY_C" -> KeyEvent.KEYCODE_C
+        "KEY_D" -> KeyEvent.KEYCODE_D
+        "KEY_E" -> KeyEvent.KEYCODE_E
+        "KEY_F" -> KeyEvent.KEYCODE_F
+        "KEY_G" -> KeyEvent.KEYCODE_G
+        "KEY_H" -> KeyEvent.KEYCODE_H
+        "KEY_I" -> KeyEvent.KEYCODE_I
+        "KEY_J" -> KeyEvent.KEYCODE_J
+        "KEY_K" -> KeyEvent.KEYCODE_K
+        "KEY_L" -> KeyEvent.KEYCODE_L
+        "KEY_M" -> KeyEvent.KEYCODE_M
+        "KEY_N" -> KeyEvent.KEYCODE_N
+        "KEY_O" -> KeyEvent.KEYCODE_O
+        "KEY_P" -> KeyEvent.KEYCODE_P
+        "KEY_Q" -> KeyEvent.KEYCODE_Q
+        "KEY_R" -> KeyEvent.KEYCODE_R
+        "KEY_S" -> KeyEvent.KEYCODE_S
+        "KEY_T" -> KeyEvent.KEYCODE_T
+        "KEY_U" -> KeyEvent.KEYCODE_U
+        "KEY_V" -> KeyEvent.KEYCODE_V
+        "KEY_W" -> KeyEvent.KEYCODE_W
+        "KEY_X" -> KeyEvent.KEYCODE_X
+        "KEY_Y" -> KeyEvent.KEYCODE_Y
+        "KEY_Z" -> KeyEvent.KEYCODE_Z
+        "KEY_0" -> KeyEvent.KEYCODE_0
+        "KEY_1" -> KeyEvent.KEYCODE_1
+        "KEY_2" -> KeyEvent.KEYCODE_2
+        "KEY_3" -> KeyEvent.KEYCODE_3
+        "KEY_4" -> KeyEvent.KEYCODE_4
+        "KEY_5" -> KeyEvent.KEYCODE_5
+        "KEY_6" -> KeyEvent.KEYCODE_6
+        "KEY_7" -> KeyEvent.KEYCODE_7
+        "KEY_8" -> KeyEvent.KEYCODE_8
+        "KEY_9" -> KeyEvent.KEYCODE_9
+        "KEY_SPACE" -> KeyEvent.KEYCODE_SPACE
+        "KEY_ENTER" -> KeyEvent.KEYCODE_ENTER
+        "KEY_ESCAPE" -> KeyEvent.KEYCODE_ESCAPE
+        "KEY_TAB" -> KeyEvent.KEYCODE_TAB
+        "KEY_BACKSPACE" -> KeyEvent.KEYCODE_DEL
+        "KEY_UP" -> KeyEvent.KEYCODE_DPAD_UP
+        "KEY_DOWN" -> KeyEvent.KEYCODE_DPAD_DOWN
+        "KEY_LEFT" -> KeyEvent.KEYCODE_DPAD_LEFT
+        "KEY_RIGHT" -> KeyEvent.KEYCODE_DPAD_RIGHT
+        else -> KeyEvent.KEYCODE_T
+    }
+
+    companion object {
+        @Volatile
+        private var activeInstance: KeyBridgeImeService? = null
+
+        fun dispatchRemappedKeyFromAccessibility(rule: MappingRule, action: Int, eventTime: Long) {
+            activeInstance?.sendSynthesizedKey(rule, action, eventTime)
+        }
     }
 }`
   },
@@ -1028,7 +1236,7 @@ class BootCompletedReceiver : BroadcastReceiver() {
     path: 'app/src/main/java/dev/keybridge/remapper/ui/MainActivity.kt',
     filename: 'MainActivity.kt',
     language: 'kotlin',
-    summary: 'Material 3 dark/light Jetpack Compose UI (Main Screen + Add/Edit Mapping Screen) with preserved draft state.',
+    summary: 'Complete Jetpack Compose UI (MainActivity + MainScreen + 2-Step AddEditMappingScreen) ready to compile.',
     content: `package dev.keybridge.remapper.ui
 
 import android.content.Intent
@@ -1036,9 +1244,12 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -1047,6 +1258,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import dev.keybridge.remapper.data.DestinationType
 import dev.keybridge.remapper.data.MappingRepository
@@ -1064,6 +1276,53 @@ private val KeyBridgeDarkColors = darkColorScheme(
     onSurface = Color(0xFFF8FAFC)
 )
 
+private val MOUSE_BUTTON_OPTIONS = listOf(
+    "MOUSE_LEFT" to "Mouse Left",
+    "MOUSE_RIGHT" to "Mouse Right",
+    "MOUSE_MIDDLE" to "Mouse Middle",
+    "MOUSE_BACK" to "Mouse Back (Button 4)",
+    "MOUSE_FORWARD" to "Mouse Forward (Button 5)",
+    "MOUSE_BUTTON_6" to "Mouse Button 6",
+    "MOUSE_BUTTON_7" to "Mouse Button 7",
+    "MOUSE_BUTTON_8" to "Mouse Button 8"
+)
+
+private val KEYBOARD_KEY_OPTIONS = listOf(
+    "KEY_T" to "Keyboard T",
+    "KEY_G" to "Keyboard G",
+    "KEY_W" to "Keyboard W",
+    "KEY_A" to "Keyboard A",
+    "KEY_S" to "Keyboard S",
+    "KEY_D" to "Keyboard D",
+    "KEY_E" to "Keyboard E",
+    "KEY_R" to "Keyboard R",
+    "KEY_F" to "Keyboard F",
+    "KEY_Q" to "Keyboard Q",
+    "KEY_C" to "Keyboard C",
+    "KEY_V" to "Keyboard V",
+    "KEY_X" to "Keyboard X",
+    "KEY_Z" to "Keyboard Z",
+    "KEY_SPACE" to "Keyboard Space",
+    "KEY_SHIFT_LEFT" to "Keyboard Left Shift",
+    "KEY_CTRL_LEFT" to "Keyboard Left Ctrl",
+    "KEY_ALT_LEFT" to "Keyboard Left Alt",
+    "KEY_TAB" to "Keyboard Tab",
+    "KEY_ESCAPE" to "Keyboard Escape",
+    "KEY_ENTER" to "Keyboard Enter",
+    "KEY_1" to "Keyboard 1",
+    "KEY_2" to "Keyboard 2",
+    "KEY_3" to "Keyboard 3",
+    "KEY_4" to "Keyboard 4",
+    "KEY_5" to "Keyboard 5",
+    "KEY_F1" to "Keyboard F1",
+    "KEY_F3" to "Keyboard F3",
+    "KEY_F5" to "Keyboard F5"
+)
+
+private fun formatInputLabel(id: String): String {
+    return (MOUSE_BUTTON_OPTIONS + KEYBOARD_KEY_OPTIONS).firstOrNull { it.first == id }?.second ?: id
+}
+
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1077,6 +1336,15 @@ class MainActivity : ComponentActivity() {
                 val mappings by repository.mappingsFlow.collectAsState(initial = emptyList())
                 var editingRule by remember { mutableStateOf<MappingRule?>(null) }
                 var isAddingNew by rememberSaveable { mutableStateOf(false) }
+
+                LaunchedEffect(masterEnabled) {
+                    if (masterEnabled) {
+                        val svcIntent = Intent(this@MainActivity, RemapperForegroundService::class.java)
+                        runCatching {
+                            ContextCompat.startForegroundService(this@MainActivity, svcIntent)
+                        }
+                    }
+                }
 
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -1139,6 +1407,288 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+@Composable
+fun MainScreen(
+    masterEnabled: Boolean,
+    mappings: List<MappingRule>,
+    onToggleMaster: (Boolean) -> Unit,
+    onAddClick: () -> Unit,
+    onEditClick: (MappingRule) -> Unit,
+    onToggleRuleClick: (MappingRule) -> Unit,
+    onDeleteClick: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Header + Master Toggle Card
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, Color(0xFF1E293B))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "KeyBridge Remapper",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (masterEnabled) "Remapping service active" else "Remapping paused",
+                        fontSize = 12.sp,
+                        color = if (masterEnabled) Color(0xFF34D399) else Color(0xFF94A3B8)
+                    )
+                }
+                Switch(
+                    checked = masterEnabled,
+                    onCheckedChange = onToggleMaster
+                )
+            }
+        }
+
+        // Add Mapping Button
+        Button(
+            onClick = onAddClick,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text("+ Add Mapping", fontWeight = FontWeight.Bold)
+        }
+
+        // Saved Mappings List
+        if (mappings.isEmpty()) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, Color(0xFF1E293B))
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "No mappings saved yet",
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Tap + Add Mapping above to bind any mouse button to a keyboard key or mouse button.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(mappings, key = { it.id }) { rule ->
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, Color(0xFF1E293B))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onEditClick(rule) }
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "\${formatInputLabel(rule.sourceMouseId)}  →  \${formatInputLabel(rule.destinationId)}",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp,
+                                    color = Color.White
+                                )
+                                if (rule.modifiers.isNotEmpty()) {
+                                    Text(
+                                        text = "Modifiers: \${rule.modifiers.joinToString("+")}",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFF60A5FA)
+                                    )
+                                }
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Switch(
+                                    checked = rule.enabled,
+                                    onCheckedChange = { onToggleRuleClick(rule) }
+                                )
+                                TextButton(onClick = { onDeleteClick(rule.id) }) {
+                                    Text("Delete", color = Color(0xFFF87171), fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AddEditMappingScreen(
+    initialRule: MappingRule?,
+    onSave: (MappingRule) -> Unit,
+    onCancel: () -> Unit
+) {
+    var step by rememberSaveable { mutableStateOf(1) }
+    var selectedSource by rememberSaveable { mutableStateOf(initialRule?.sourceMouseId ?: "MOUSE_FORWARD") }
+    var destinationType by rememberSaveable { mutableStateOf(initialRule?.destinationType ?: DestinationType.KEYBOARD) }
+    var selectedDestination by rememberSaveable { mutableStateOf(initialRule?.destinationId ?: "KEY_T") }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            text = if (step == 1) "Step 1 of 2: Select Mouse Button" else "Step 2 of 2: Select Replacement Key",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+
+        if (step == 1) {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(MOUSE_BUTTON_OPTIONS) { (id, label) ->
+                    val isSelected = selectedSource == id
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isSelected) Color(0xFF1E3A8A) else MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, if (isSelected) Color(0xFF3B82F6) else Color(0xFF1E293B)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedSource = id }
+                    ) {
+                        Text(
+                            text = label,
+                            modifier = Modifier.padding(14.dp),
+                            color = Color.White,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onCancel,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = { step = 2 },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Next Step")
+                }
+            }
+        } else {
+            val options = if (destinationType == DestinationType.KEYBOARD) KEYBOARD_KEY_OPTIONS else MOUSE_BUTTON_OPTIONS
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        destinationType = DestinationType.KEYBOARD
+                        selectedDestination = "KEY_T"
+                    }
+                ) {
+                    Text("Keyboard Key")
+                }
+                OutlinedButton(
+                    onClick = {
+                        destinationType = DestinationType.MOUSE
+                        selectedDestination = "MOUSE_RIGHT"
+                    }
+                ) {
+                    Text("Mouse Button")
+                }
+            }
+
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(options) { (id, label) ->
+                    val isSelected = selectedDestination == id
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isSelected) Color(0xFF1E3A8A) else MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, if (isSelected) Color(0xFF3B82F6) else Color(0xFF1E293B)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedDestination = id }
+                    ) {
+                        Text(
+                            text = label,
+                            modifier = Modifier.padding(14.dp),
+                            color = Color.White,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { step = 1 },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Back")
+                }
+                Button(
+                    onClick = {
+                        onSave(
+                            MappingRule(
+                                id = initialRule?.id ?: java.util.UUID.randomUUID().toString(),
+                                sourceMouseId = selectedSource,
+                                destinationType = destinationType,
+                                destinationId = selectedDestination,
+                                enabled = initialRule?.enabled ?: true
+                            )
+                        )
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Save Mapping")
+                }
+            }
+        }
+    }
 }`
   },
   {
@@ -1148,15 +1698,15 @@ class MainActivity : ComponentActivity() {
     summary: 'Complete build instructions, Android Studio NDK setup, and privilege activation steps for Root, Shizuku, and Stock Android.',
     content: `# KeyBridge Android Mouse Remapper — Build & Deployment Guide
 
-## 1. Prerequisites
-- **Android Studio Ladybug (2024.2.1)** or newer
-- **Android SDK 34** (minSdk 26 / Android 8.0+)
-- **Android NDK 26+** & **CMake 3.22.1** (for \`uinput_bridge.cpp\` compilation)
+## 1. Automated Cloud APK Build (GitHub Actions — Zero Setup)
+1. Upload all extracted files from \`KeyBridge-Android-APK-Project.zip\` (including the \`.github/workflows/build-apk.yml\` folder) to a GitHub repository.
+2. Open the **Actions** tab in your GitHub repository.
+3. Click the **Build KeyBridge Android APK** workflow run and download **\`KeyBridge-Android-APK\`** (\`app-debug.apk\`).
 
-## 2. Building from Source
+## 2. Building Locally from Source
 1. Open the project root in Android Studio or run via Gradle CLI:
    \`\`\`bash
-   ./gradlew assembleDebug
+   gradle assembleDebug
    \`\`\`
 2. Install onto a physical Android device over ADB:
    \`\`\`bash
@@ -1177,3 +1727,4 @@ Required for intercepting **all** mouse buttons (\`Left\`, \`Right\`, \`Middle\`
 3. Intercepts \`KEYCODE_BACK\` and \`KEYCODE_FORWARD\` emitted by Mouse Buttons 4 & 5 on stock Android without root.`
   }
 ];
+
