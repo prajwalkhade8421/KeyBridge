@@ -1,0 +1,6 @@
+{
+  "name": "KeyBridge Android Mouse Remapper",
+  "description": "Persistent hardware mouse-to-keyboard and mouse-to-mouse button remapper for Android with live input diagnostic verifier and full Android Studio hybrid uinput/Accessibility project exporter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
